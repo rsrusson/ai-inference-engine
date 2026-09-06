@@ -1,0 +1,19 @@
+# ============================================================================
+# AI Inference Engine — vLLM serving stack
+#
+# `vllm` is the centerpiece serving engine. It pulls in its own pinned,
+# compatible versions of torch / transformers / accelerate / safetensors /
+# pydantic / numpy as transitive dependencies, so do NOT pin those here —
+# declaring our own versions conflicts with the set vLLM is tested against.
+#
+# This file intentionally lists the minimum we install DIRECTLY. Anything else
+# (load-testing tooling, etc.) that runs on the host PC belongs in a separate
+# dev-environment file added in a later phase.
+#
+# Install (Python 3.10, CUDA-capable NVIDIA driver present):
+#   python3 -m venv .venv-vllm
+#   .venv-vllm/bin/pip install --upgrade pip
+#   .venv-vllm/bin/pip install -r requirements.txt
+# ============================================================================
+
+vllm>=0.28.0

@@ -1,0 +1,30 @@
+# Python virtual environments
+.venv/
+.venv-*/
+venv/
+venv-*/
+env/
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Jupyter / scratch
+.ipynb_checkpoints/
+
+# Logs & temp files
+*.log
+nohup.out
+/tmp/
+
+# opencode local tooling config (personal, not project source)
+.opencode/
+
+# OS metadata
+.DS_Store
+
+# Local serving env overrides if you ever use real dotenv secrets
+.env
