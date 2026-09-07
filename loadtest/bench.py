@@ -33,18 +33,17 @@ import aiohttp
 
 # --- Shared, identical workload across both targets ---------------------------
 PROMPT = "Explain what an inference-serving engine does in two or three short sentences."
-MAX_TOKENS = 128
 TEMPERATURE = 1.0
 TOP_P = 0.9
 
 BASELINE_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def make_payload(mode: str) -> dict:
+def make_payload(mode: str, max_tokens: int) -> dict:
     if mode == "baseline":
         return {
             "prompt": PROMPT,
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": max_tokens,
             "temperature": TEMPERATURE,
             "top_p": TOP_P,
         }
@@ -52,7 +51,7 @@ def make_payload(mode: str) -> dict:
     return {
         "model": BASELINE_MODEL,
         "messages": [{"role": "user", "content": PROMPT}],
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": max_tokens,
         "temperature": TEMPERATURE,
         "top_p": TOP_P,
     }
@@ -82,8 +81,9 @@ async def one_request(mode: str, session: aiohttp.ClientSession, url: str, paylo
     return {"lat": lat, "tokens": tokens, "ok": status == 200, "err": None}
 
 
-async def run_sweep(mode: str, url: str, concurrency: int, n_requests: int) -> dict:
-    payload = make_payload(mode)
+async def run_sweep(mode: str, url: str, concurrency: int, n_requests: int,
+                    max_tokens: int = 128) -> dict:
+    payload = make_payload(mode, max_tokens)
     async with aiohttp.ClientSession() as session:
         sem = asyncio.Semaphore(concurrency)
 
@@ -138,14 +138,18 @@ async def amain(argv: list[str]) -> int:
     ap.add_argument("--url", required=True, help="full endpoint URL")
     ap.add_argument("--mode", choices=["baseline", "vllm"], default="vllm")
     ap.add_argument("--concurrency", type=int, default=1)
+    ap.add_argument("--max-tokens", dest="max_tokens", type=int, default=128,
+                    help="generation max_tokens to request (default 128)")
     ap.add_argument("--requests", type=int, default=10,
                     help="total requests to send at this concurrency (>= concurrency)")
     args = ap.parse_args(argv)
 
     print(f"mode={args.mode} url={args.url} conc={args.concurrency} "
-          f"requests={args.requests} prompt_len~{len(PROMPT)} max_tokens={MAX_TOKENS}\n"
+          f"requests={args.requests} prompt_len~{len(PROMPT)} max_tokens={args.max_tokens}\n"
           f"shared workload: temperature={TEMPERATURE} top_p={TOP_P}")
-    r = await run_sweep(args.mode, args.url, args.concurrency, args.requests)
+    r = await run_sweep(args.mode, args.url, args.concurrency, args.requests,
+                        max_tokens=args.max_tokens)
+    r["max_tokens"] = args.max_tokens
     print(pretty(r))
     # JSON line for easy capture into results tables
     print("JSON\t" + json.dumps(r))

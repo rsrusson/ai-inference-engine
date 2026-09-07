@@ -76,3 +76,172 @@ python3 loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode
 python3 loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode vllm --concurrency 8  --requests 40
 ```
 GPU is exclusive per side; do baseline first, then vLLM (or vice versa), not together.
+
+---
+
+# Phase 2.2 — KV cache / PagedAttention memory behaviour
+
+Model: `Qwen/Qwen2.5-0.5B-Instruct`, GPU util 0.85, `vllm.serve.sh`. Drives
+`vram_watch.py`, which reports three things: the **idle(config)** state via
+`/metrics`, the **peak `kv_cache_usage_perc`** sampled ~3 Hz while requests are in
+flight, and `nvidia-smi` used-memory.
+
+## Key architectural finding first (important nuance)
+
+vLLM does **NOT** grow its cache memory with load in the naive sense: it
+**pre-allocates** a PagedAttention block pool at startup, sized by
+`gpu_memory_utilization` (0.85 x usable VRAM). So total GPU memory held is ~flat
+once warm, regardless of concurrency:
+
+  nvidia-smi used (idle)  ~= 7.27 GB  and stays ~equal under full load.
+
+What actually changes with load is **how much of that pre-allocated pool is
+consumed by KV blocks** — exposed as `vllm:kv_cache_usage_perc` on `/metrics`.
+This is the dynamic signal that "KV grows as sequences pile up."
+
+## A) KV-cache occupancy vs concurrency (max-model-len 2048, forced length)
+
+Shorter answers (real chat) free blocks quickly, so to *see* blocks accumulate we
+force full-length output (`ignore_eos: true`, max_tokens=512) so live sequences
+hold their KV blocks while piling up.
+
+| Concurrent full-length seqs | Peak kv_cache_usage_perc | out tokens | total_sec |
+|---|---|---|---|
+| 1  | ~0.1 % |  512 | 4.9 |
+| 4  | ~0.4 % | 2048 | 5.5 |
+| 8  | ~0.9 % | 4096 | 9.3 |
+
+Block-usage scales ~linearly with concurrent sequences (each active sequence owns
+its KV blocks until it finishes) — the PagedAttention pool is drained by live
+requests exactly as predicted.
+
+Why the *percentages* are tiny: 0.5B has few layers / KV heads, so even an 8-way
+burst of 512-token sequences touches <1% of a cache that is sized as ~481k tokens
+`(481296)` `num_gpu_blocks=30081` @ max-len 2048. On this small model the cache is
+vastly over-provisioned relative to realistic load — a deliberate headroom choice
+for the concurrency story (see model note). Memory-pressure/OOM can't be meaningfully
+reached here *unless* the cache budget is shrunk (lower util) or `max_model_len`
+is raised to shrink per-sequence fit — which is exactly the Phase 2.3 experiment.
+
+## B) Effect of raising --max-model-len (same GPU util 0.85)
+
+Re-booted with `MAX_MODEL_LEN=8192`. With `gpu_memory_utilization` FIXED, total
+cache memory stays ~constant; what changes is how the pool and graph-capture are
+provisioned:
+
+| Metric | max-model-len 2048 | max-model-len 8192 | effect |
+|---|---|---|---|
+| kv_cache_size_tokens | 481296            | 445424             | less token capacity |
+| num_gpu_blocks       | 30081              | 27839              | fewer PagedAttention blocks |
+| kv_cache_max_concurrency | higher        | 54.4               | fewer (longest) concurrent seqs fit before OOM |
+| idling  used (nvidia-smi) | ~7.27 GB    | ~7.27 GB           | ~flat (util-bound, not length-bound) |
+
+Interpretation: raising max-model-len does NOT add memory; it re-budgets the same
+reserved pool AND increases the largest CUDA-graph capture, so you end with
+**fewer** blocks/tokens of headroom and lower max concurrency per sequence length.
+It is the configuration lever that governs per-sequence headroom; combined with a
+shrunk util budget it is the axis explored for OOM in Phase 2.3 (see below).
+
+## Reproduce (Phase 2.2)
+```bash
+# vLLM @ max-model-len 2048 (default)
+nohup ./vllm.serve.sh >/tmp/vllm.log 2>&1 &
+python3 loadtest/vram_watch.py --port 8000 --concurrency 1 --max-tokens 512 --requests 1 --ignore-eos
+python3 loadtest/vram_watch.py --port 8000 --concurrency 4 --max-tokens 512 --requests 4 --ignore-eos
+python3 loadtest/vram_watch.py --port 8000 --concurrency 8 --max-tokens 512 --requests 8 --ignore-eos
+
+# vLLM @ max-model-len 8192 to compare config/headroom
+MAX_MODEL_LEN=8192 nohup ./vllm.serve.sh >/tmp/vllm8192.log 2>&1 &
+curl -s http://127.0.0.1:8000/metrics | grep -a cache_config_info
+```
+
+---
+
+# Phase 2.3 — OOM forcing attempt & the honest finding
+
+Attempted to force a `CUDA out of memory` on the permanent 0.5B model (Option B:
+shrink the reserved KV pool, then hammer it with long concurrent sequences). The
+result is more interesting than a crash: **0.5B will not allocator-OOM on this
+card.** This section records the KV arithmetic, the admission-control behaviour
+proved, and why a real OOM needs the quantized-larger-model appendix.
+
+## KV-cache arithmetic (validated against vLLM)
+
+`Qwen2.5-0.5B` / Qwen2 arch config:
+- `num_hidden_layers` = 24, `num_key_value_heads` = 2 (GQA, head_dim 64), dtype bf16 (2 B).
+
+KV bytes per stored token = `2 (K&V) × layers × kv_heads × head_dim × dtype_bytes`
+= `2 × 24 × 2 × 64 × 2 = 12,288 B ≈ 12 KB / token`.
+
+vLLM reports cache capacity in tokens and this matches: at max_len.2048 util .85,
+`kv_cache_size_tokens`=481296 → 481296 × 12288 B ≈ 5.5 GiB cache ≈ the reported
+`Available KV cache memory: 5.1–5.5 GiB`. Formula checks out.
+
+## We CAN shrink the cache; we CANNOT make it run out
+
+Under-provision by booting with low GPU util (+ max-model-len 4096):
+
+| Config (MAX_MODEL_LEN / GPU_UTIL) | cache size tokens | GPU KV cache | num_gpu_blocks | nvidia-smi idle |
+|---|---|---|---|---|
+| 2048 / 0.85 (default) | 481296 | ~5.5 GiB | 30081 | ~7.27 GB |
+| 4096 / 0.45 | 165824 | 1.9 GiB | 10364 | ~4.00 GB  |
+
+Then sustained bursts against the 1.9 GiB cache (util .45, max-len 4096):
+
+| Load | kv usage peak | out tok/s | errors | server state |
+|---|---|---|---|---|
+| 48 concurrent × 1500 tok | 44 % | 2497 | 0 | healthy (p50 ~28 s) |
+| 128 concurrent × 3500 tok × 256 | — | — | 0 | **still healthy** (200) |
+
+**Why no OOM:** vLLM's scheduler is *admission controlled*. It never admits more
+in-flight sequences than the pre-allocated block pool can hold; excess demand is
+**queued**, not allocated. And 0.5B's weights+activations fit easily even in 45%
+of the card, so no genuinely unmeetable allocation ever occurs. The observable cost
+of overload is latency/queueing growth, not a crash.
+
+## The reproducible misconfiguration error (config lever does bite)
+What DOES deterministically reject is requesting more output than the engine allows:
+```
+max_tokens=5000 cannot be greater than max_model_len=4096  (HTTP 400, BadRequest)
+```
+This is the same **`--max-model-len` lever** from the fix story: set it too low for
+the deployment's prompt+output length and valid requests bounce with a clear error;
+raise it (subject to VRAM/KV arithmetic) and they pass.
+
+## Conclusion / why a real OOM needs the appendix
+A true raster-level `CUDA out of memory` on permanent 0.5B is effectively
+unreachable, because (a) the model is far too small to starve even a shrunk cache,
+and (b) the memory manager refuses to oversubscribe. The genuinely dramatic OOM —
+weights that genuinely do not fit → startup abort (`No available memory for the
+cache blocks`, as seen with 3B) or runtime exhaustion — requires the
+**quantized-larger-model appendix** (e.g. 3B-AWQ, or a very-low-util + very-large
+max-len pathological config), which compresses weights enough to boot but still
+far closer to the memory ceiling. That is deliberately pending as an optional later
+milestone; the value captured here is the admission-control + KV-arithmetic lesson,
+which is the transferable infra concept.
+
+## Recovery levers exercised (so they are documented where they do matter)
+- `GPU_UTIL` — right-sizes the reserved KV pool to workload (0.45 → drops idle VRAM
+  7.3→4.0 GB, shrinks 30081→10364 blocks; too-low starves cache for long seqs).
+- `MAX_MODEL_LEN` — bounds per-sequence length & graph capture; too-low rejects long
+  prompts via 400, too-high shrinks blocks/headroom (see Phase 2.2 §B).
+- `MAX_NUM_SEQS` — optional admission cap (added to `vllm.serve.sh` as `MAX_NUM_SEQS`);
+  enforces a hard bound on simultaneous sequences to keep per-request latency bounded
+  under heavy traffic instead of unbounded queueing.
+- `vram_watch.py --max-tokens N --ignore-eos` — keeps sequences resident long enough to
+  actually observe cache occupancy (short chat answers free blocks too fast to study).
+
+## Reproduce
+```bash
+# under-provisioned cache (util 0.45, longer max len)
+GPU_UTIL=0.45 MAX_MODEL_LEN=4096 nohup ./vllm.serve.sh >/tmp/vllm45.log 2>&1 &
+curl -s http://127.0.0.1:8000/metrics | grep -a cache_config_info   # blocks/cache size
+# sustained burst -> queues, does NOT OOM:
+python3 loadtest/vram_watch.py --port 8000 --concurrency 48 --max-tokens 1500 --requests 48 --ignore-eos
+# deterministic config rejection -> fix lever:
+curl -s http://127.0.0.1:8000/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"Qwen/Qwen2.5-0.5B-Instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":5000}'
+
+# optional admission cap on top:
+GPU_UTIL=0.45 MAX_MODEL_LEN=4096 MAX_NUM_SEQS=8 nohup ./vllm.serve.sh >/tmp/vllm_cap.log 2>&1 &
+```

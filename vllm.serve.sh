@@ -43,6 +43,9 @@ export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-8000}"
 export GPU_UTIL="${GPU_UTIL:-0.85}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-2048}"
+# Optional admission cap (blank => let vLLM auto-tune). Set e.g. 16 to enforce a
+# hard limit on simultaneously-running sequences (a recovery lever for 2.3).
+export MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
 
 # --- Fixed environment (see header) -------------------------------------------
 export VLLM_WSL2_ENABLE_PIN_MEMORY=1
@@ -57,11 +60,13 @@ if [[ ! -x "$VLLM_BIN" ]]; then
     exit 1
 fi
 
-echo "[vllm.serve] model=${MODEL} host=${HOST} port=${PORT} mem_util=${GPU_UTIL} max_len=${MAX_MODEL_LEN}"
+echo "[vllm.serve] model=${MODEL} host=${HOST} port=${PORT} mem_util=${GPU_UTIL} max_len=${MAX_MODEL_LEN}${MAX_NUM_SEQS:+ max_num_seqs=${MAX_NUM_SEQS}}"
 echo "[vllm.serve] CUDA_HOME=${CUDA_HOME}"
 
-exec "$VLLM_BIN" serve "$MODEL" \
-    --host "$HOST" \
-    --port "$PORT" \
-    --gpu-memory-utilization "$GPU_UTIL" \
-    --max-model-len "$MAX_MODEL_LEN"
+ARGS=(serve "$MODEL" --host "$HOST" --port "$PORT"
+      --gpu-memory-utilization "$GPU_UTIL" --max-model-len "$MAX_MODEL_LEN")
+if [[ -n "$MAX_NUM_SEQS" ]]; then
+    ARGS+=(--max-num-seqs "$MAX_NUM_SEQS")
+fi
+
+exec "$VLLM_BIN" "${ARGS[@]}"
