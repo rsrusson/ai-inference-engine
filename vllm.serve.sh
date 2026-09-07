@@ -38,7 +38,7 @@ VLLM_BIN="$VENV_VLLM/bin/vllm"
 CUDA13_HOME="$VENV_VLLM/lib/python3.10/site-packages/nvidia/cu13"
 
 # --- Overridable defaults -----------------------------------------------------
-export MODEL="${MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
+export MODEL="${MODEL:-Qwen/Qwen2.5-0.5B-Instruct}"
 export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-8000}"
 export GPU_UTIL="${GPU_UTIL:-0.85}"

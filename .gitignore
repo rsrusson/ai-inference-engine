@@ -28,3 +28,6 @@ nohup.out
 
 # Local serving env overrides if you ever use real dotenv secrets
 .env
+
+# Local IDE / editor configs
+PLAN.md
