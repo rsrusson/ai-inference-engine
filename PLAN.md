@@ -16,7 +16,7 @@ concept/arithmetic reference lives in `INFRA-CONCEPTS.md`; raw results in
 | 2.2 | KV-cache/PagedAttention memory behaviour | ✅ done |
 | 2.3 | Force & fix OOM (honest finding) | ✅ done² |
 | 2.4 | Quantized-larger-model appendix (real weight-driven wall) | ✅ done⁴ |
-| 3 | Load-testing instrumentation | ◑ core tool done³ |
+| 3 | Load-testing instrumentation | ✅ done³ |
 | 4 | (optional) Triton front-end | ⏸ not started |
 | 5 | Portfolio write-up (`README.md`, repo hygiene) | ⏳ not started |
 
@@ -24,8 +24,10 @@ concept/arithmetic reference lives in `INFRA-CONCEPTS.md`; raw results in
   unverified and is not required for the measured results.
 ² Result: vLLM does **not** allocator-OOM on 0.5B — its scheduler queues instead
   of oversubscribing. A real OOM needs the quantized-larger-model appendix.
-³ `loadtest/bench.py` (async concurrency client) exists and produced the Phase 2
-  numbers; Phase 3 remains "done-ish" pending optional reinforcement tooling.
+³ `loadtest/bench.py` now has a `--stream` mode reporting TTFT/ITL; `run_load.sh`
+  wraps the standard set; official `vllm bench serve` provides canonical
+  TTFT/ITL/throughput + Poisson `--request-rate`. Headline numbers in
+  `loadtest/README.md`.
 ⁴ 3B-AWQ proves quantization buys KV headroom (bf16-3B won't boot); 7B-AWQ
   produces the real weight-driven wall (startup abort at max_model_len 8192;
   boots at 2048). Results in `loadtest/README.md`.
@@ -128,12 +130,18 @@ Runs bounded (short `max_tokens`, concurrency ≤ 8). Launcher gained `QUANTIZAT
 (blank = auto-detect) and `bench.py` gained `--model`. Data in `loadtest/README.md`.
 0.5B remains canonical for all other phases.
 
-### Phase 3 — Load-testing instrumentation ◑
-- Core client done: `loadtest/bench.py` (asyncio, per-request latency + aggregate
-  tok/s, `--mode baseline|vllm`, `--max-tokens`); `loadtest/vram_watch.py` for
-  occupancy/VRAM. Results/method: `loadtest/README.md`.
-- Optional reinforcement (not required): official `benchmark_serving.py`, or
-  `hey`/`wrk`/`locust` for external ramp-style load.
+### Phase 3 — Load-testing instrumentation ✅
+- `loadtest/bench.py` — async client; `--stream` reports **TTFT + ITL** (via OpenAI
+  SSE) plus aggregate tok/s and e2e percentiles; `--mode baseline|vllm`, `--model`,
+  `--max-tokens`. `loadtest/vram_watch.py` for occupancy/VRAM.
+- `loadtest/run_load.sh` — runs the standard set (non-stream sweep, stream sweep,
+  official benchmark) against a running server.
+- Official `vllm bench serve` (`--backend openai-chat`) gives canonical
+  TTFT/ITL/TPOT/E2E + throughput and supports Poisson `--request-rate`.
+- Headline results + metric definitions: `loadtest/README.md` (Phase 3 section).
+  On 0.5B: throughput scales ~121→395→635 tok/s at conc 1/4/8 while ITL stays
+  ~8–9.5 ms and TTFT grows ~26→86 ms — the continuous-batching signature.
+- Optional/external load tools (`hey`/`wrk`/`locust`) intentionally not used.
 
 ### Phase 4 — (optional stretch) Triton front-end ⏸
 Put the vLLM OpenAI-compatible service behind NVIDIA Triton (HTTP/gRPC) for

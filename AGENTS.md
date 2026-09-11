@@ -76,10 +76,23 @@ vLLM stopped (or vice versa).
   --url http://127.0.0.1:8000/v1/chat/completions --mode vllm \
   --concurrency 8 --requests 40 --max-tokens 128
 # add --model <id> when serving a non-default (e.g. AWQ) checkpoint
+# add --stream for SSE TTFT + ITL (vLLM/OpenAI mode only)
 
 # KV-cache occupancy / VRAM while forcing full-length generation
 .venv-vllm/bin/python loadtest/vram_watch.py \
   --port 8000 --concurrency 8 --max-tokens 512 --requests 8 --ignore-eos
+
+# whole standard set (non-stream sweep, stream sweep, official benchmark)
+./loadtest/run_load.sh
+
+# official canonical TTFT/ITL/throughput (Poisson with --request-rate)
+.venv-vllm/bin/vllm bench serve --backend openai-chat \
+  --base-url http://127.0.0.1:8000 --endpoint /v1/chat/completions \
+  --model Qwen/Qwen2.5-0.5B-Instruct --served-model-name Qwen/Qwen2.5-0.5B-Instruct \
+  --dataset-name random --random-input-len 128 --random-output-len 128 \
+  --num-prompts 32 --max-concurrency 8 --ignore-eos \
+  --percentile-metrics ttft,itl,e2el --metric-percentiles 50,95,99 \
+  --save-result --result-dir /tmp/p3_bench
 ```
 Methodology and measured results live in `loadtest/README.md`.
 
@@ -107,9 +120,10 @@ requirements.txt        # vLLM stack (vllm is the only direct dep; it vendors th
 requirements-torch.txt  # baseline stack (torch/transformers/fastapi pins)
 PLAN.md                 # phased roadmap + model decision record
 INFRA-CONCEPTS.md       # serving/memory cheat sheet (tokens, blocks, KV math, knobs)
-loadtest/bench.py       # async concurrency throughput/latency client
+loadtest/bench.py       # async concurrency client (tok/s, e2e lat; --stream TTFT/ITL)
 loadtest/vram_watch.py  # KV-cache occupancy + nvidia-smi sampler
-loadtest/README.md      # measured results + method per phase (2.1 / 2.2 / 2.3)
+loadtest/run_load.sh    # standard load set (sweeps + official benchmark)
+loadtest/README.md      # measured results + method per phase (2.1 / 2.2 / 2.3 / 2.4 / 3)
 ```
 
 ## Code style & conventions

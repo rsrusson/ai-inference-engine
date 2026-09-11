@@ -344,3 +344,84 @@ MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ MAX_MODEL_LEN=8192 nohup ./vllm.serve.sh >/tm
 MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ MAX_MODEL_LEN=2048 nohup ./vllm.serve.sh >/tmp/vllm_7b.log 2>&1 &
 ```
 (Optional explicit flag if auto-detect ever fails: `QUANTIZATION=awq_marlin`.)
+
+---
+
+# Phase 3 — Load-testing instrumentation (TTFT / ITL / throughput)
+
+Metric definitions and tooling for measuring a serving endpoint. All numbers
+below are canonical **`Qwen/Qwen2.5-0.5B-Instruct`** on the 8 GB card, vLLM 0.28.
+
+## Metrics (the serving vocabulary)
+- **TTFT** — time-to-first-token: request send → first generated token. Dominated
+  by prefill + scheduling/queueing; the UX latency users feel first.
+- **ITL / TPOT** — inter-token latency (a.k.a. time-per-output-token): gap between
+  successive generated tokens. Governs streaming "feel" after the first token.
+- **E2E latency** — total request time (prefill + all decode).
+- **Throughput** — aggregate output tok/s across all in-flight requests.
+- **Goodput** — throughput of only SLO-satisfying requests (official tool; not
+  measured here).
+
+Ideal behavior under rising concurrency: **throughput rises, ITL stays roughly
+flat, TTFT rises moderately** (the queue gets deeper but batching keeps the token
+loop fed).
+
+## Tooling
+- **`bench.py`** — custom async client. `--stream` consumes OpenAI SSE and reports
+  TTFT + ITL + aggregate tok/s + e2e percentiles. Non-stream mode reports tok/s +
+  e2e only. Supports `--mode baseline|vllm`, `--model`, `--max-tokens`.
+- **`vram_watch.py`** — KV-cache occupancy + `nvidia-smi` sampler (Phases 2.2/2.3).
+- **`vllm bench serve`** — official canonical benchmark (`--backend openai-chat`);
+  reports mean/median/p50/p95/p99 TTFT, ITL/TPOT, E2E, throughput, goodput, and
+  supports `--request-rate` Poisson arrivals. Use for headline numbers.
+- **`run_load.sh`** — runs the standard set (non-stream sweep, stream sweep,
+  official benchmark) against a running server.
+
+## Headline results (0.5B, max_tokens=128)
+
+### Custom streaming client (`bench.py --stream`) — TTFT/ITL vs concurrency
+| Concurrency | out tok/s | TTFT p50 | TTFT p95 | ITL p50 |
+|---|---|---|---|---|
+| 1 | 121 | 26 ms | 40 ms | 8.1 ms |
+| 4 | 395 | 43 ms | 76 ms | 9.3 ms |
+| 8 | **635** | 86 ms | 89 ms | 9.5 ms |
+
+Throughput scales ~5x from conc 1→8 while **ITL barely moves (8→9.5 ms)** and
+**TTFT grows modestly (~26→86 ms)** — exactly the continuous-batching signature.
+(0 errors across all runs.)
+
+### Official `vllm bench serve` (canonical headline)
+Fixed concurrency 8 (`--max-concurrency 8`, 32 prompts, 128 in/out, ignore-eos):
+| Metric | Mean | P50 | P95 | P99 |
+|---|---|---|---|---|
+| TTFT (ms) | 90.3 | 64.5 | 204.7 | 205.3 |
+| ITL (ms) | 9.0 | 8.7 | 11.4 | 15.3 |
+| E2E (ms) | 1243 | 1169 | 1490 | 1491 |
+
+Output token throughput **820 tok/s**, total token throughput **1827 tok/s**,
+request throughput **6.41 req/s**, 32/32 successful.
+
+Poisson arrival (`--request-rate 8`, 40 prompts, `--ignore-eos`):
+TTFT mean 51 ms / p50 45 ms / p99 154 ms; ITL p50 9.1 ms / p99 20.8 ms;
+output throughput **828 tok/s** (peak 1202). Confirms the tooling supports
+arrival-rate (ramp-style) load, not just fixed concurrency.
+
+Results JSON is saved under the run's `--result-dir` (e.g. `/tmp/p3_bench/`).
+
+## Reproduce (Phase 3)
+```bash
+# server up (see ../vllm.serve.sh), then:
+./loadtest/run_load.sh                      # all three groups
+
+# or individually:
+.venv-vllm/bin/python loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions \
+    --mode vllm --stream --concurrency 8 --requests 16 --max-tokens 128
+
+.venv-vllm/bin/vllm bench serve --backend openai-chat \
+    --base-url http://127.0.0.1:8000 --endpoint /v1/chat/completions \
+    --model Qwen/Qwen2.5-0.5B-Instruct --served-model-name Qwen/Qwen2.5-0.5B-Instruct \
+    --dataset-name random --random-input-len 128 --random-output-len 128 \
+    --num-prompts 32 --max-concurrency 8 --ignore-eos \
+    --percentile-metrics ttft,itl,e2el --metric-percentiles 50,95,99 \
+    --save-result --result-dir /tmp/p3_bench
+```
