@@ -6,7 +6,7 @@ Measures aggregate output tokens/sec and latency percentiles by firing
 `concurrency` identical generation requests at a FastAPI/OpenAI-compatible
 endpoint. Supports BOTH targets so results are directly comparable:
 
-  * baseline  (main-torch.py :8001)  -> POST /generate   (its Request/Response schema)
+  * baseline  (v1-baseline/main-torch.py :8001)  -> POST /generate   (its Request/Response schema)
   * vLLM      (:8000)                -> POST /v1/chat/completions (OpenAI schema)
 
 Phase 3 adds `--stream` (vLLM/OpenAI only): consume Server-Sent Events and

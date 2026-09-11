@@ -18,7 +18,7 @@ concept/arithmetic reference lives in `INFRA-CONCEPTS.md`; raw results in
 | 2.4 | Quantized-larger-model appendix (real weight-driven wall) | ✅ done⁴ |
 | 3 | Load-testing instrumentation | ✅ done³ |
 | 4 | (optional) Triton front-end | 📝 architected (docs + reference stack; deploy deferred) |
-| 5 | Portfolio write-up (`README.md`, repo hygiene) | ⏳ not started |
+| 5 | Portfolio write-up (`README.md`, repo restructure) | ✅ done |
 
 ¹ Endpoints verified on-box (curl). Host-PC browser reachability was left
   unverified and is not required for the measured results.
@@ -41,17 +41,17 @@ deployment that demonstrates continuous batching and PagedAttention, and shows h
 sequence-length & KV-cache budgeting governs behaviour on an 8 GB GPU, backed by
 measured load tests."*
 
-- `main-torch.py` — the **naive but working baseline** (single-request, static KV,
+- `v1-baseline/main-torch.py` — the **naive but working baseline** (single-request, static KV,
   in-process). Kept deliberately for A/B comparison; **deprioritized**, not the
   centerpiece.
-- vLLM (via `.venv-vllm` + `./vllm.serve.sh`) — the serving centerpiece.
+- vLLM (via `.venv-vllm` + `./serve/vllm.serve.sh`) — the serving centerpiece.
 
 ## Target hardware reality (anchors every number)
 
 - 1× RTX 3070 Laptop, **8 GB VRAM**, driver 596.08 / CUDA 13.2.
 - 16 GB RAM, 16 CPUs, ~945 GB disk — single node.
 - **WSL2** (`6.18.x-microsoft-standard-WSL2`). vLLM needs the WSL2/missing-toolchain
-  workarounds in `vllm.env` to boot; always launch via `./vllm.serve.sh`.
+  workarounds in `serve/vllm.env` to boot; always launch via `./serve/vllm.serve.sh`.
 
 ## Model decision record
 
@@ -78,14 +78,14 @@ Why 0.5B (and not bigger):
 ### Phase 0 — Env prep ✅
 - Two isolated venvs so the stacks don't fight: `.venv-vllm` (engine) and
   `.venv-torch` (baseline). Neither is relocatable — **never rename a venv**.
-- Pins: `requirements.txt` (vLLM — the only direct dep; it vendors the rest) and
-  `requirements-torch.txt` (baseline).
-- Launcher + env rationale: `vllm.serve.sh` and `vllm.env` (documents the WSL2
+- Pins: `serve/requirements.txt` (vLLM — the only direct dep; it vendors the rest)
+  and `v1-baseline/requirements-torch.txt` (baseline).
+- Launcher + env rationale: `serve/vllm.serve.sh` and `serve/vllm.env` (documents the WSL2
   pin-memory/UVA, FlashInfer-sampler, CUDA-toolkit, and PATH workarounds).
 - Repo hygiene: `.gitignore` excludes `.venv-*/`, caches, logs, `.opencode/`.
 
 ### Phase 1 — Serve 0.5B-Instruct with vLLM ✅
-- Launch: `./vllm.serve.sh` (wraps `vllm serve Qwen/Qwen2.5-0.5B-Instruct --host
+- Launch: `./serve/vllm.serve.sh` (wraps `vllm serve Qwen/Qwen2.5-0.5B-Instruct --host
   0.0.0.0 --port 8000 --gpu-memory-utilization 0.85 --max-model-len 2048` plus the
   env overrides).
 - Verified `/health`, `/v1/models`, and a sample `POST /v1/chat/completions`.
@@ -153,13 +153,15 @@ modes + when-to-choose in `TRITON-ARCHITECTURE.md`; runnable reference stack in
 (Triton is container-first), a native build is fragile, and the single 8 GB GPU is
 already committed to vLLM — the same reasoning captured in the doc's §7.
 
-### Phase 5 — Portfolio write-up ⏳
-Fill the root `README.md` (currently empty) into one narrative:
-- Motivation (naive static KV → why batched/Paged serving).
-- Baseline-vs-vLLM numbers + optional graphs (`matplotlib`).
-- KV-cache arithmetic + the honest OOM finding (link `INFRA-CONCEPTS.md`).
-- Architecture diagram (client → WSL2 vLLM :8000; baseline :8001).
-- Repo hygiene (optional restructure into `v1-baseline/`, `serve/`, `loadtest/`).
+### Phase 5 — Portfolio write-up ✅
+- Root `README.md` now holds the full portfolio narrative: pitch, headline
+  results table, motivation, architecture, results per phase, concepts links,
+  Triton stretch, and reproduce quickstart.
+- Repo restructured for clarity: `v1-baseline/` (baseline), `serve/` (engine
+  launcher + env + requirements), `docs/` (these notes), `loadtest/` (harness),
+  `deploy/triton/` (Triton reference). `AGENTS.md` stays at root for tooling.
+- Path references across docs/scripts updated and re-verified (vLLM boots via
+  `serve/vllm.serve.sh`; baseline runs via `v1-baseline/main-torch.py`).
 
 ## Appendices / future work
 - **Quantized-larger-model appendix** (the real OOM + weight-driven ceiling):
@@ -170,4 +172,4 @@ Fill the root `README.md` (currently empty) into one narrative:
 - Working vLLM `/v1/chat/completions` endpoint (on-box verified).
 - Measured baseline-vs-vLLM throughput + KV/PagedAttention memory behaviour.
 - KV arithmetic + OOM-vs-admission-control finding.
-- Root `README.md` portfolio narrative (pending Phase 5).
+- Root `README.md` portfolio narrative (done — Phase 5).

@@ -3,10 +3,10 @@
 #
 # MODE 2 (front door): Triton runs a Python-backend proxy model that forwards
 # requests to a vLLM OpenAI server. vLLM stays exactly as this repo runs it
-# (see ../../../vllm.serve.sh); Triton adds the HTTP/gRPC/KServe/metrics surface.
+# (see ../../../serve/vllm.serve.sh); Triton adds the HTTP/gRPC/KServe/metrics surface.
 #
 # NOT run by this repo's dev workflow. This host (WSL2) has no Docker — see
-# ../../../TRITON-ARCHITECTURE.md §7. Run this on a Docker-capable machine:
+# ../../../docs/TRITON-ARCHITECTURE.md §7. Run this on a Docker-capable machine:
 #
 #   # 1) start vLLM where Triton can reach it (host network or same network)
 #   # 2) from deploy/triton/:

@@ -21,7 +21,7 @@ unless a run is explicitly experimenting with another tag.
 - Same prompt (~78 tokens): *"Explain what an inference-serving engine does in two or
   three short sentences."*
 - Same sampler settings: `temperature=1.0`, `top_p=0.9`, `max_tokens=128`.
-- **baseline** = `main-torch.py` (`POST /generate`, transformers + torch fp16, static KV,
+- **baseline** = `v1-baseline/main-torch.py` (`POST /generate`, transformers + torch fp16, static KV,
   in-process generation, **no dynamic batching**). Measured at its natural concurrency = 1
   (it can only meaningfully serve one sequence; higher N just queues).
 - **vLLM** = `vllm serve` (`POST /v1/chat/completions`). Continuously batches concurrent
@@ -65,11 +65,11 @@ Baseline is avg of two 6-request runs (~18.5 and 21.4 tok/s). vLLM rows at N in
 ## Reproduce
 ```bash
 # baseline (needs .venv-torch rebuilt; binds :8001)
-nohup .venv-torch/bin/python main-torch.py >/tmp/baseline.log 2>&1 &
+nohup .venv-torch/bin/python v1-baseline/main-torch.py >/tmp/baseline.log 2>&1 &
 python3 loadtest/bench.py --url http://127.0.0.1:8001/generate --mode baseline --concurrency 1 --requests 6
 
 # vLLM (binds :8000, defaults to 0.5B)
-nohup ./vllm.serve.sh >/tmp/vllm.log 2>&1 &
+nohup ./serve/vllm.serve.sh >/tmp/vllm.log 2>&1 &
 python3 loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode vllm --concurrency 1  --requests 6
 python3 loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode vllm --concurrency 2  --requests 12
 python3 loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode vllm --concurrency 4  --requests 24
@@ -81,7 +81,7 @@ GPU is exclusive per side; do baseline first, then vLLM (or vice versa), not tog
 
 # Phase 2.2 — KV cache / PagedAttention memory behaviour
 
-Model: `Qwen/Qwen2.5-0.5B-Instruct`, GPU util 0.85, `vllm.serve.sh`. Drives
+Model: `Qwen/Qwen2.5-0.5B-Instruct`, GPU util 0.85, `serve/vllm.serve.sh`. Drives
 `vram_watch.py`, which reports three things: the **idle(config)** state via
 `/metrics`, the **peak `kv_cache_usage_perc`** sampled ~3 Hz while requests are in
 flight, and `nvidia-smi` used-memory.
@@ -145,13 +145,13 @@ shrunk util budget it is the axis explored for OOM in Phase 2.3 (see below).
 ## Reproduce (Phase 2.2)
 ```bash
 # vLLM @ max-model-len 2048 (default)
-nohup ./vllm.serve.sh >/tmp/vllm.log 2>&1 &
+nohup ./serve/vllm.serve.sh >/tmp/vllm.log 2>&1 &
 python3 loadtest/vram_watch.py --port 8000 --concurrency 1 --max-tokens 512 --requests 1 --ignore-eos
 python3 loadtest/vram_watch.py --port 8000 --concurrency 4 --max-tokens 512 --requests 4 --ignore-eos
 python3 loadtest/vram_watch.py --port 8000 --concurrency 8 --max-tokens 512 --requests 8 --ignore-eos
 
 # vLLM @ max-model-len 8192 to compare config/headroom
-MAX_MODEL_LEN=8192 nohup ./vllm.serve.sh >/tmp/vllm8192.log 2>&1 &
+MAX_MODEL_LEN=8192 nohup ./serve/vllm.serve.sh >/tmp/vllm8192.log 2>&1 &
 curl -s http://127.0.0.1:8000/metrics | grep -a cache_config_info
 ```
 
@@ -225,7 +225,7 @@ which is the transferable infra concept.
   7.3→4.0 GB, shrinks 30081→10364 blocks; too-low starves cache for long seqs).
 - `MAX_MODEL_LEN` — bounds per-sequence length & graph capture; too-low rejects long
   prompts via 400, too-high shrinks blocks/headroom (see Phase 2.2 §B).
-- `MAX_NUM_SEQS` — optional admission cap (added to `vllm.serve.sh` as `MAX_NUM_SEQS`);
+- `MAX_NUM_SEQS` — optional admission cap (added to `serve/vllm.serve.sh` as `MAX_NUM_SEQS`);
   enforces a hard bound on simultaneous sequences to keep per-request latency bounded
   under heavy traffic instead of unbounded queueing.
 - `vram_watch.py --max-tokens N --ignore-eos` — keeps sequences resident long enough to
@@ -234,7 +234,7 @@ which is the transferable infra concept.
 ## Reproduce
 ```bash
 # under-provisioned cache (util 0.45, longer max len)
-GPU_UTIL=0.45 MAX_MODEL_LEN=4096 nohup ./vllm.serve.sh >/tmp/vllm45.log 2>&1 &
+GPU_UTIL=0.45 MAX_MODEL_LEN=4096 nohup ./serve/vllm.serve.sh >/tmp/vllm45.log 2>&1 &
 curl -s http://127.0.0.1:8000/metrics | grep -a cache_config_info   # blocks/cache size
 # sustained burst -> queues, does NOT OOM:
 python3 loadtest/vram_watch.py --port 8000 --concurrency 48 --max-tokens 1500 --requests 48 --ignore-eos
@@ -243,7 +243,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'content-type: application/
   -d '{"model":"Qwen/Qwen2.5-0.5B-Instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":5000}'
 
 # optional admission cap on top:
-GPU_UTIL=0.45 MAX_MODEL_LEN=4096 MAX_NUM_SEQS=8 nohup ./vllm.serve.sh >/tmp/vllm_cap.log 2>&1 &
+GPU_UTIL=0.45 MAX_MODEL_LEN=4096 MAX_NUM_SEQS=8 nohup ./serve/vllm.serve.sh >/tmp/vllm_cap.log 2>&1 &
 ```
 
 ---
@@ -265,7 +265,7 @@ loads these with its bundled ops — Marlin int4 kernel on sm_86 (RTX 3070), **n
 
 - `Model loading took 1.95 GiB` (int4) vs ~6 GB bf16 → **quantization is what makes
   a 3B-class model servable on 8 GB at all.** This is the practical counterpart to
-  the "fp16→fp8 halves KV" note in `INFRA-CONCEPTS.md` §7.
+  the "fp16→fp8 halves KV" note in `../docs/INFRA-CONCEPTS.md` §7.
 - Idle `nvidia-smi`: **7385 MiB** (util 0.85); `num_gpu_blocks=7265`, block 16.
 
 ### Bounded throughput (3B-AWQ, max_tokens=64)
@@ -334,14 +334,14 @@ serves coherent int4 output. So the fix story is:
 ## Reproduce (Phase 2.4)
 ```bash
 # 3B-AWQ: quantization makes a 3B servable (bf16 3B won't boot)
-MODEL=Qwen/Qwen2.5-3B-Instruct-AWQ nohup ./vllm.serve.sh >/tmp/vllm_3bawq.log 2>&1 &
+MODEL=Qwen/Qwen2.5-3B-Instruct-AWQ nohup ./serve/vllm.serve.sh >/tmp/vllm_3bawq.log 2>&1 &
 .venv-vllm/bin/python loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions \
   --mode vllm --model Qwen/Qwen2.5-3B-Instruct-AWQ --concurrency 8 --requests 8 --max-tokens 64
 
 # 7B-AWQ: weight-driven wall (startup abort at 8192)
-MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ MAX_MODEL_LEN=8192 nohup ./vllm.serve.sh >/tmp/vllm_7b_8k.log 2>&1 &
+MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ MAX_MODEL_LEN=8192 nohup ./serve/vllm.serve.sh >/tmp/vllm_7b_8k.log 2>&1 &
 # ... then the recovery: a max_len the weights leave room for
-MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ MAX_MODEL_LEN=2048 nohup ./vllm.serve.sh >/tmp/vllm_7b.log 2>&1 &
+MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ MAX_MODEL_LEN=2048 nohup ./serve/vllm.serve.sh >/tmp/vllm_7b.log 2>&1 &
 ```
 (Optional explicit flag if auto-detect ever fails: `QUANTIZATION=awq_marlin`.)
 
@@ -410,7 +410,7 @@ Results JSON is saved under the run's `--result-dir` (e.g. `/tmp/p3_bench/`).
 
 ## Reproduce (Phase 3)
 ```bash
-# server up (see ../vllm.serve.sh), then:
+# server up (see ../serve/vllm.serve.sh), then:
 ./loadtest/run_load.sh                      # all three groups
 
 # or individually:

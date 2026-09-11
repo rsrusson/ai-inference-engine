@@ -1,11 +1,11 @@
 # deploy/triton — reference stack (NVIDIA Triton Inference Server + vLLM)
 
 **Reference only — not run on the dev box.** The WSL2 dev machine has no Docker;
-see `../../TRITON-ARCHITECTURE.md` §7 for the decision record. This directory is
+see `../../docs/TRITON-ARCHITECTURE.md` §7 for the decision record. This directory is
 a template to run on a Docker-capable host with an NVIDIA GPU.
 
 ## What it does
-Implements **Mode 2** from `TRITON-ARCHITECTURE.md`: Triton runs a
+Implements **Mode 2** from `../../docs/TRITON-ARCHITECTURE.md`: Triton runs a
 Python-backend **proxy model** (`llm_proxy`) that forwards to a vLLM OpenAI
 server. vLLM stays exactly as this repo runs it; Triton adds the
 HTTP/gRPC/KServe/metrics surface in front.
@@ -13,12 +13,12 @@ HTTP/gRPC/KServe/metrics surface in front.
 ## Prerequisites
 - Docker + Docker Compose
 - NVIDIA Container Toolkit (so the container can see the GPU)
-- A running vLLM server (this repo: `../../vllm.serve.sh`) reachable from Triton
+- A running vLLM server (this repo: `../../serve/vllm.serve.sh`) reachable from Triton
 
 ## Run
 ```bash
 # 1) start vLLM (on the host)
-cd ../.. && nohup ./vllm.serve.sh >/tmp/vllm.log 2>&1 &
+cd ../.. && nohup ./serve/vllm.serve.sh >/tmp/vllm.log 2>&1 &
 curl -s http://127.0.0.1:8000/health          # 200 = ready
 
 # 2) start Triton (front door)

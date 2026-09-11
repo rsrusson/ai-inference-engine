@@ -24,16 +24,17 @@
 #       Prepend the venv bin so tools like `ninja` (used during JIT builds) are
 #       discoverable on subprocess PATH.
 #
-# Usage:
-#   ./vllm.serve.sh                        # run in foreground, default model
-#   MODEL=... PORT=... ./vllm.serve.sh     # override model/port
-#   QUANTIZATION=awq_marlin MODEL=... ./vllm.serve.sh   # quantized experiment
-#   ./vllm.serve.sh --log /tmp/vllm.log &  # run detached, tee logs to a file
+# Usage (from the repo root):
+#   ./serve/vllm.serve.sh                        # foreground, default model
+#   MODEL=... PORT=... ./serve/vllm.serve.sh     # override model/port
+#   QUANTIZATION=awq_marlin MODEL=... ./serve/vllm.serve.sh   # quantized experiment
+#   ./serve/vllm.serve.sh --log /tmp/vllm.log &  # detached, tee logs to a file
 # =============================================================================
 set -Eeuo pipefail
 
 # --- Repo bootstrap (resolve paths regardless of CWD) -------------------------
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# This script lives in serve/; the venvs live at the repo root.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_VLLM="$REPO_DIR/.venv-vllm"
 VLLM_BIN="$VENV_VLLM/bin/vllm"
 CUDA13_HOME="$VENV_VLLM/lib/python3.10/site-packages/nvidia/cu13"
@@ -61,7 +62,7 @@ export PATH="$VENV_VLLM/bin:$PATH"
 # --- Execute ----------------------------------------------------------------
 if [[ ! -x "$VLLM_BIN" ]]; then
     echo "[vllm.serve] ERROR: '$VLLM_BIN' not found." >&2
-    echo "[vllm.serve] Did you run:  python3 -m venv .venv-vllm && .venv-vllm/bin/pip install -r requirements.txt" >&2
+    echo "[vllm.serve] Did you run:  python3 -m venv .venv-vllm && .venv-vllm/bin/pip install -r serve/requirements.txt" >&2
     exit 1
 fi
 

@@ -2,7 +2,7 @@
 # =============================================================================
 # run_load.sh — run the standard load-test set against a running vLLM server.
 #
-# Assumes vLLM is already up (see ../vllm.serve.sh) and reachable at BASE_URL.
+# Assumes vLLM is already up (see ../serve/vllm.serve.sh) and reachable at BASE_URL.
 # Runs three groups and prints results to stdout (also JSON lines):
 #   1) non-streaming concurrency sweep      (bench.py, aggregate tok/s + e2e lat)
 #   2) streaming sweep                      (bench.py --stream, TTFT + ITL)

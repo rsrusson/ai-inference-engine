@@ -72,7 +72,7 @@ routes into vLLM's engine.
   plane.
 
 ### Mode 2 — Triton as a **front door** in front of the vLLM OpenAI server
-Keep vLLM running exactly as in this repo (`./vllm.serve.sh`, `/v1/chat/completions`),
+Keep vLLM running exactly as in this repo (`./serve/vllm.serve.sh`, `/v1/chat/completions`),
 and put a Triton model in front that acts as a **proxy / orchestrator**:
 either an **HTTP proxy model** or a **Business-Logic Scripting (BLS)** Python
 model that calls vLLM with `requests`/`aiohttp` and returns the result.
