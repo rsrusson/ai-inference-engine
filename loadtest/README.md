@@ -245,3 +245,102 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'content-type: application/
 # optional admission cap on top:
 GPU_UTIL=0.45 MAX_MODEL_LEN=4096 MAX_NUM_SEQS=8 nohup ./vllm.serve.sh >/tmp/vllm_cap.log 2>&1 &
 ```
+
+---
+
+# Phase 2.4 — Quantized-larger-model appendix (weight-driven wall)
+
+Explicit experiment against `Qwen2.5-3B-Instruct-AWQ` and `Qwen2.5-7B-Instruct-AWQ`
+both **AWQ int4** (`quant_method=awq`, group 128) to show the memory wall that a
+0.5B model cannot reach, and to prove **quantization buys KV headroom**. vLLM 0.28
+loads these with its bundled ops — Marlin int4 kernel on sm_86 (RTX 3070), **no
+`autoawq` package and no nvcc/JIT** required. Auto-detection picked `auto_awq`.
+
+## The quantization lever: 3B bf16 (won't boot) vs 3B-AWQ (boots) ✅
+
+| 3B variant | Weights on GPU | Boots? | KV cache available | cache tokens | max concurrency @2048 |
+|---|---|---|---|---|---|
+| bf16 (`Qwen2.5-3B-Instruct`) | ~6 GB | ❌ abort | negative (−0.45 GiB) | — | — |
+| **AWQ int4** | **1.95 GiB** | ✅ | **3.99 GiB** | 116,240 | 56.8× |
+
+- `Model loading took 1.95 GiB` (int4) vs ~6 GB bf16 → **quantization is what makes
+  a 3B-class model servable on 8 GB at all.** This is the practical counterpart to
+  the "fp16→fp8 halves KV" note in `INFRA-CONCEPTS.md` §7.
+- Idle `nvidia-smi`: **7385 MiB** (util 0.85); `num_gpu_blocks=7265`, block 16.
+
+### Bounded throughput (3B-AWQ, max_tokens=64)
+| Concurrency | out tok/s | p50 | notes |
+|---|---|---|---|
+| 1 | ~43 | 0.61 s | |
+| 4 | ~153 | 0.83 s | |
+| 8 (cold) | ~47 | 5.81 s | first batch-8: compile/cudagraph warmup artifact |
+| 8 (warm) | **272** | 0.96 s | re-run; scaling holds |
+
+Scaling mirrors Phase 2.1 (aggregate tok/s rises with N). The first N=8 run is a
+**cold-start** effect, not a steady-state regression. Quality check: an int4 sample
+answer about PagedAttention was coherent and on-topic, so int4 remains usable.
+
+## The genuine weight-driven wall: 7B-AWQ ✅ (what 2.3 could not produce)
+
+7B-AWQ weights are **5.29 GiB** on the 8 GB card. Its KV arithmetic is also heavier:
+head_dim 128, 28 layers, 4 KV heads → `2×28×4×128×2 = 56 KB/token`
+(vs 12 KB/token for 0.5B).
+
+| 7B-AWQ config | GPU KV cache | cache tokens | max concurrency @2048 | result |
+|---|---|---|---|---|
+| `--max-model-len 2048` | 0.2 GiB | 3,696 | **1.8×** | boots, barely (1-2 concurrent seqs) |
+| `--max-model-len 8192` | needs 0.44 GiB, only 0.2 GiB free | — | — | **hard startup abort** |
+
+The `max_model_len=8192` startup failed with the real memory-arithmetic wall:
+
+```
+ValueError: To serve at least one request with the model's max seq len (8192),
+0.44 GiB KV cache is needed, which is larger than the available KV cache memory (0.2 GiB).
+Based on the available memory, the estimated maximum model length is 3696.
+Try increasing `gpu_memory_utilization` ... or decreasing `max_model_len` ...
+```
+
+This is the weight-driven ceiling in concrete form: 5.29 GiB weights leave only
+~0.2 GiB for PagedAttention, so vLLM **refuses to start** rather than oversubscribe.
+Unlike Phase 2.3 (load-time queueing on 0.5B), this is a genuine, reproducible
+**OOM-class failure** — the engine's own message states the max supportable length
+(3696) and the levers.
+
+### Recovery lever ✅
+Relaunched at `--max-model-len 2048` (a length the weight-crowded budget can hold):
+boots cleanly, **0.98 GiB cache / 18,400 tokens / 8.98× concurrency**, `/health` 200,
+serves coherent int4 output. So the fix story is:
+**lower `max_model_len` to fit the post-weights budget** (alternatives: raise
+`gpu_memory_utilization`, or use the smaller 3B-AWQ).
+
+## Consolidated weight-vs-KV table (all measured)
+| Model (mode) | Weight GPU mem | KV cache avail | cache tokens | verdict |
+|---|---|---|---|---|
+| 0.5B bf16 (canonical) | ~1 GB | ~5.5 GiB | 481,296 | fits comfortably |
+| 3B bf16 | ~6 GB | negative | — | **won't boot** |
+| 3B-AWQ int4 | 1.95 GiB | 3.99 GiB | 116,240 | fits well |
+| 7B-AWQ int4 @2048 | 5.29 GiB | 0.2 GiB | 3,696 | fits w/ ~1.8× concurrency |
+| 7B-AWQ int4 @8192 | 5.29 GiB | needs 0.44 GiB | — | **startup abort** |
+
+## Takeaways
+- **Quantization is a memory lever**: it converts an unbootable 3B into a
+  comfortably servable one, and makes a 7B land *just* within an 8 GB card.
+- **Weights and KV compete for the same budget**: once weights dominate (7B), KV
+  collapses and `max_model_len` must shrink — the exact trade the plan wanted to show.
+- **The docs rule still holds**: 0.5B remains the canonical model; this phase is a
+  deliberate, bounded experiment using the launcher's `MODEL=` / `QUANTIZATION=`
+  overrides. No new Python deps were needed (ops are bundled in vLLM).
+
+## Reproduce (Phase 2.4)
+```bash
+# 3B-AWQ: quantization makes a 3B servable (bf16 3B won't boot)
+MODEL=Qwen/Qwen2.5-3B-Instruct-AWQ nohup ./vllm.serve.sh >/tmp/vllm_3bawq.log 2>&1 &
+.venv-vllm/bin/python loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions \
+  --mode vllm --model Qwen/Qwen2.5-3B-Instruct-AWQ --concurrency 8 --requests 8 --max-tokens 64
+
+# 7B-AWQ: weight-driven wall (startup abort at 8192)
+MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ MAX_MODEL_LEN=8192 nohup ./vllm.serve.sh >/tmp/vllm_7b_8k.log 2>&1 &
+# ... then the recovery: a max_len the weights leave room for
+MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ MAX_MODEL_LEN=2048 nohup ./vllm.serve.sh >/tmp/vllm_7b.log 2>&1 &
+```
+(Optional explicit flag if auto-detect ever fails: `QUANTIZATION=awq_marlin`.)

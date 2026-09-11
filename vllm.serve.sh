@@ -27,6 +27,7 @@
 # Usage:
 #   ./vllm.serve.sh                        # run in foreground, default model
 #   MODEL=... PORT=... ./vllm.serve.sh     # override model/port
+#   QUANTIZATION=awq_marlin MODEL=... ./vllm.serve.sh   # quantized experiment
 #   ./vllm.serve.sh --log /tmp/vllm.log &  # run detached, tee logs to a file
 # =============================================================================
 set -Eeuo pipefail
@@ -46,6 +47,10 @@ export MAX_MODEL_LEN="${MAX_MODEL_LEN:-2048}"
 # Optional admission cap (blank => let vLLM auto-tune). Set e.g. 16 to enforce a
 # hard limit on simultaneously-running sequences (a recovery lever for 2.3).
 export MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
+# Optional quantization override for the 2.4 appendix.
+# Blank => vLLM auto-detects from the checkpoint (recommended). Set explicitly
+# (e.g. QUANTIZATION=awq_marlin) only if auto-detection fails.
+export QUANTIZATION="${QUANTIZATION:-}"
 
 # --- Fixed environment (see header) -------------------------------------------
 export VLLM_WSL2_ENABLE_PIN_MEMORY=1
@@ -60,13 +65,16 @@ if [[ ! -x "$VLLM_BIN" ]]; then
     exit 1
 fi
 
-echo "[vllm.serve] model=${MODEL} host=${HOST} port=${PORT} mem_util=${GPU_UTIL} max_len=${MAX_MODEL_LEN}${MAX_NUM_SEQS:+ max_num_seqs=${MAX_NUM_SEQS}}"
+echo "[vllm.serve] model=${MODEL} host=${HOST} port=${PORT} mem_util=${GPU_UTIL} max_len=${MAX_MODEL_LEN}${MAX_NUM_SEQS:+ max_num_seqs=${MAX_NUM_SEQS}}${QUANTIZATION:+ quantization=${QUANTIZATION}}"
 echo "[vllm.serve] CUDA_HOME=${CUDA_HOME}"
 
 ARGS=(serve "$MODEL" --host "$HOST" --port "$PORT"
       --gpu-memory-utilization "$GPU_UTIL" --max-model-len "$MAX_MODEL_LEN")
 if [[ -n "$MAX_NUM_SEQS" ]]; then
     ARGS+=(--max-num-seqs "$MAX_NUM_SEQS")
+fi
+if [[ -n "$QUANTIZATION" ]]; then
+    ARGS+=(--quantization "$QUANTIZATION")
 fi
 
 exec "$VLLM_BIN" "${ARGS[@]}"
