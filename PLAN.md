@@ -17,7 +17,7 @@ concept/arithmetic reference lives in `INFRA-CONCEPTS.md`; raw results in
 | 2.3 | Force & fix OOM (honest finding) | ✅ done² |
 | 2.4 | Quantized-larger-model appendix (real weight-driven wall) | ✅ done⁴ |
 | 3 | Load-testing instrumentation | ✅ done³ |
-| 4 | (optional) Triton front-end | ⏸ not started |
+| 4 | (optional) Triton front-end | 📝 architected (docs + reference stack; deploy deferred) |
 | 5 | Portfolio write-up (`README.md`, repo hygiene) | ⏳ not started |
 
 ¹ Endpoints verified on-box (curl). Host-PC browser reachability was left
@@ -143,9 +143,15 @@ Runs bounded (short `max_tokens`, concurrency ≤ 8). Launcher gained `QUANTIZAT
   ~8–9.5 ms and TTFT grows ~26→86 ms — the continuous-batching signature.
 - Optional/external load tools (`hey`/`wrk`/`locust`) intentionally not used.
 
-### Phase 4 — (optional stretch) Triton front-end ⏸
-Put the vLLM OpenAI-compatible service behind NVIDIA Triton (HTTP/gRPC) for
-enterprise framing. Optional; may become its own follow-up project.
+### Phase 4 — (optional stretch) Triton front-end ⏸→📝 architected
+**Architected and documented; deployment deferred to a Docker-capable host.**
+NVIDIA Triton Inference Server sits *in front of* a vLLM engine (Mode 2 front-door
+proxy, or Mode 1 vLLM Python backend) and adds HTTP/gRPC/KServe, a versioned model
+repository, ensembles, lifecycle control, and metrics. Full design + integration
+modes + when-to-choose in `TRITON-ARCHITECTURE.md`; runnable reference stack in
+`deploy/triton/`. Not deployed here because the WSL2 dev box has **no Docker**
+(Triton is container-first), a native build is fragile, and the single 8 GB GPU is
+already committed to vLLM — the same reasoning captured in the doc's §7.
 
 ### Phase 5 — Portfolio write-up ⏳
 Fill the root `README.md` (currently empty) into one narrative:

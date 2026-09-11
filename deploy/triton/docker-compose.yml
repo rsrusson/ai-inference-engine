@@ -1,0 +1,45 @@
+# =============================================================================
+# Reference stack: NVIDIA Triton Inference Server in front of a vLLM engine.
+#
+# MODE 2 (front door): Triton runs a Python-backend proxy model that forwards
+# requests to a vLLM OpenAI server. vLLM stays exactly as this repo runs it
+# (see ../../../vllm.serve.sh); Triton adds the HTTP/gRPC/KServe/metrics surface.
+#
+# NOT run by this repo's dev workflow. This host (WSL2) has no Docker — see
+# ../../../TRITON-ARCHITECTURE.md §7. Run this on a Docker-capable machine:
+#
+#   # 1) start vLLM where Triton can reach it (host network or same network)
+#   # 2) from deploy/triton/:
+#   docker compose up
+#   # Triton:  http://localhost:8000/v2/health/ready   (KServe v2)
+#   #          grpc://localhost:8001
+#   #          http://localhost:8002/metrics
+#
+# NOTE: uses --network host so the proxy can reach vLLM on 127.0.0.1. On macOS
+# or swarm, switch to a shared docker network and set VLLM_URL accordingly.
+# =============================================================================
+services:
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.10-py3
+    container_name: triton
+    network_mode: host
+    shm_size: "1g"
+    environment:
+      # Override to point at your vLLM OpenAI server (default: same host :8000).
+      - VLLM_URL=${VLLM_URL:-http://127.0.0.1:8000}
+      - VLLM_MODEL=${VLLM_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
+    command:
+      - tritonserver
+      - --model-repository=/models
+      - --strict-model-config=false
+      - --log-verbose=1
+    volumes:
+      - ./model_repository:/models:ro
+    # GPU reservation (Triton also needs the NVIDIA container toolkit on the host)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

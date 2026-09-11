@@ -120,6 +120,8 @@ requirements.txt        # vLLM stack (vllm is the only direct dep; it vendors th
 requirements-torch.txt  # baseline stack (torch/transformers/fastapi pins)
 PLAN.md                 # phased roadmap + model decision record
 INFRA-CONCEPTS.md       # serving/memory cheat sheet (tokens, blocks, KV math, knobs)
+TRITON-ARCHITECTURE.md  # Phase 4: NVIDIA Triton design/integration (not deployed here)
+deploy/triton/          # reference Docker stack for Triton+vLLM (needs Docker; not run)
 loadtest/bench.py       # async concurrency client (tok/s, e2e lat; --stream TTFT/ITL)
 loadtest/vram_watch.py  # KV-cache occupancy + nvidia-smi sampler
 loadtest/run_load.sh    # standard load set (sweeps + official benchmark)
