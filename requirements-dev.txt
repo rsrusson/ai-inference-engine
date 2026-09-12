@@ -1,0 +1,7 @@
+# Test/dev dependencies for local runs and CI.
+# Kept separate from the serving stack (serve/requirements.txt) so CI stays light:
+# these tests exercise pure logic and API models only — no GPU, no model load.
+pytest>=8.0
+aiohttp>=3.9
+fastapi>=0.115
+pydantic>=2.8

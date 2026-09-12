@@ -1,9 +1,9 @@
-# PLAN.md — AI Infrastructure Engineer portfolio project: LLM serving with vLLM
+# Roadmap & decision record — LLM serving with vLLM
 
-A living plan and decision record. Each phase produces a portfolio artifact and
-a measured result. Keep this file truthful and current: update it whenever a
-phase's status or findings change. (Canonical model and hardware facts are here;
-concept/arithmetic reference lives in `INFRA-CONCEPTS.md`; raw results in
+A living plan and decision record. Each phase produces a concrete artifact and a
+measured result. Keep this file truthful and current: update it whenever a phase's
+status or findings change. (Canonical model and hardware facts are here;
+concept/arithmetic reference + full mental model lives in `INFRA-CONCEPTS.md`; raw results in
 `loadtest/README.md`.)
 
 ## Status at a glance
@@ -15,10 +15,10 @@ concept/arithmetic reference lives in `INFRA-CONCEPTS.md`; raw results in
 | 2.1 | Throughput: naive baseline vs vLLM at concurrency N | ✅ done |
 | 2.2 | KV-cache/PagedAttention memory behaviour | ✅ done |
 | 2.3 | Force & fix OOM (honest finding) | ✅ done² |
-| 2.4 | Quantized-larger-model appendix (real weight-driven wall) | ✅ done⁴ |
+| 2.4 | Quantized-larger-model appendix (weight-driven wall, conditional) | ✅ done⁴ |
 | 3 | Load-testing instrumentation | ✅ done³ |
 | 4 | (optional) Triton front-end | 📝 architected (docs + reference stack; deploy deferred) |
-| 5 | Portfolio write-up (`README.md`, repo restructure) | ✅ done |
+| 5 | Write-up (`README.md`, repo restructure) | ✅ done |
 
 ¹ Endpoints verified on-box (curl). Host-PC browser reachability was left
   unverified and is not required for the measured results.
@@ -29,17 +29,16 @@ concept/arithmetic reference lives in `INFRA-CONCEPTS.md`; raw results in
   TTFT/ITL/throughput + Poisson `--request-rate`. Headline numbers in
   `loadtest/README.md`.
 ⁴ 3B-AWQ proves quantization buys KV headroom (bf16-3B won't boot); 7B-AWQ
-  produces the real weight-driven wall (startup abort at max_model_len 8192;
-  boots at 2048). Results in `loadtest/README.md`.
+  produces a **conditional** weight-driven abort at max_model_len 8192 (cold
+  `torch.compile`: aborts; warm AOT cache: boots) — see `loadtest/README.md`.
 
-## Big picture & framing for the job hunt
+## Goals & scope
 
-The portfolio story: *"I operate the whole lifecycle that makes inference fast and
+The project demonstrates the full lifecycle that makes LLM inference fast and
 memory-safe — from hand-written PyTorch serving, through understanding why naive
-serving wastes GPU memory and throughput, up to a production-grade vLLM
-deployment that demonstrates continuous batching and PagedAttention, and shows how
-sequence-length & KV-cache budgeting governs behaviour on an 8 GB GPU, backed by
-measured load tests."*
+serving wastes GPU memory and throughput, up to a vLLM deployment that shows
+continuous batching and PagedAttention, and how sequence-length & KV-cache
+budgeting governs behaviour on an 8 GB GPU, backed by measured load tests.
 
 - `v1-baseline/main-torch.py` — the **naive but working baseline** (single-request, static KV,
   in-process). Kept deliberately for A/B comparison; **deprioritized**, not the
@@ -122,10 +121,16 @@ its bundled Marlin ops (no external quant packages, no nvcc JIT).
 - **`Qwen2.5-3B-Instruct-AWQ` ✅** proves **quantization buys KV headroom**: bf16-3B
   cannot boot (negative cache); 3B-AWQ loads in 1.95 GiB with **3.99 GiB KV cache**
   (116,240 tokens) and scales tok/s with concurrency (43→153→272 at N=1/4/8).
-- **`Qwen2.5-7B-Instruct-AWQ` ✅** — the **genuine wall**: 5.29 GiB weights leave
-  only 0.2 GiB cache, so `max_model_len=8192` **aborts at startup** (needs 0.44 GiB);
-  at 2048 it boots with a mere 1.8× concurrency. Recovery = lower `max_model_len`
-  (boots, 0.98 GiB cache / 8.98×), raise util, or use 3B-AWQ.
+- **`Qwen2.5-7B-Instruct-AWQ` ✅** — the wall, but **conditional (cold vs warm)**:
+  5.29 GiB weights leave thin KV headroom. On a **cold** first run `torch.compile`
+  (Inductor) actually compiles kernels and its transient peak raises the reserved
+  headroom to ~1.0 GiB, leaving only 0.2 GiB cache, so `max_model_len=8192`
+  **aborts at startup** (needs 0.44 GiB); on a **warm** run the saved AOT artifact is
+  loaded (peak ~0.26 GiB, cache 0.98 GiB) and the same flags **boot** (18,400 tokens,
+  2.25×). Recovery = lower `max_model_len` (2048 always fits), raise util, or use
+  3B-AWQ. Reproduced both ways by clearing `~/.cache/vllm/torch_compile_cache`, and
+  confirmed via vLLM's own memory profiling (`VLLM_LOGGING_LEVEL=DEBUG`).
+  Lesson: a failure may be state-dependent — reproduce before asserting a wall.
 Runs bounded (short `max_tokens`, concurrency ≤ 8). Launcher gained `QUANTIZATION`
 (blank = auto-detect) and `bench.py` gained `--model`. Data in `loadtest/README.md`.
 0.5B remains canonical for all other phases.
@@ -153,10 +158,10 @@ modes + when-to-choose in `TRITON-ARCHITECTURE.md`; runnable reference stack in
 (Triton is container-first), a native build is fragile, and the single 8 GB GPU is
 already committed to vLLM — the same reasoning captured in the doc's §7.
 
-### Phase 5 — Portfolio write-up ✅
-- Root `README.md` now holds the full portfolio narrative: pitch, headline
-  results table, motivation, architecture, results per phase, concepts links,
-  Triton stretch, and reproduce quickstart.
+### Phase 5 — Write-up ✅
+- Root `README.md` now holds the full write-up: pitch, headline results table,
+  motivation, architecture, results per phase, concepts links, Triton stretch,
+  and reproduce quickstart.
 - Repo restructured for clarity: `v1-baseline/` (baseline), `serve/` (engine
   launcher + env + requirements), `docs/` (these notes), `loadtest/` (harness),
   `deploy/triton/` (Triton reference). `AGENTS.md` stays at root for tooling.
@@ -164,12 +169,14 @@ already committed to vLLM — the same reasoning captured in the doc's §7.
   `serve/vllm.serve.sh`; baseline runs via `v1-baseline/main-torch.py`).
 
 ## Appendices / future work
-- **Quantized-larger-model appendix** (the real OOM + weight-driven ceiling):
-  a 3B-AWQ class checkpoint, weight compression vs KV headroom. Optional; carries
-  WSL2/quant-toolchain risk.
+- **Quantized-larger-model appendix (done, Phase 2.4)**: 3B-AWQ bought KV headroom;
+  7B-AWQ showed a **conditional** weight-driven startup abort (cold vs warm). Any
+  further work would be a *deterministic* OOM demo (e.g. pinning a pathologically low
+  `gpu_memory_utilization`), which carries WSL2/quant-toolchain risk.
+- **Triton deployment** on a Docker-capable host (see `TRITON-ARCHITECTURE.md`).
 
 ## Deliverables
 - Working vLLM `/v1/chat/completions` endpoint (on-box verified).
 - Measured baseline-vs-vLLM throughput + KV/PagedAttention memory behaviour.
 - KV arithmetic + OOM-vs-admission-control finding.
-- Root `README.md` portfolio narrative (done — Phase 5).
+- Root `README.md` write-up (done — Phase 5).

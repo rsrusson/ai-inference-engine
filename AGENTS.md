@@ -6,7 +6,7 @@ change.
 
 ## Project overview
 
-A portfolio/learning project demonstrating LLM inference serving on a single
+A project demonstrating LLM inference serving on a single
 small GPU: a **naive baseline** (`v1-baseline/main-torch.py`, FastAPI + transformers, static
 KV) A/B-compared against a **production serving engine** (`vLLM`, continuous
 batching + PagedAttention), backed by measured throughput/memory experiments.
@@ -15,14 +15,14 @@ batching + PagedAttention), backed by measured throughput/memory experiments.
 - **Primary framework**: Python 3.10, vLLM 0.28, PyTorch, FastAPI.
 - **Canonical model**: `Qwen/Qwen2.5-0.5B-Instruct` on 1x RTX 3070 Laptop
   (**8 GB VRAM**) under **WSL2**. See `docs/PLAN.md` (roadmap + model decision record)
-  and `docs/INFRA-CONCEPTS.md` (serving/memory cheat sheet).
+  and `docs/INFRA-CONCEPTS.md` (the full mental model / concepts guide).
 
 > **WSL2 is the environment.** vLLM will not boot here without specific
 > workarounds. **Always launch via `./serve/vllm.serve.sh`**, never a bare
 > `vllm serve`, or it fails with `RuntimeError: UVA is not available` and/or
 > FlashInfer JIT toolchain errors. See `vllm.env` for the rationale of each flag.
 
-> **Docs must stay truthful.** This project is a learning artifact. A wrong claim
+> **Docs must stay truthful.** This project is a public artifact. A wrong claim
 > (e.g. "3B is the model", "we forced a CUDA OOM") is worse than no claim. Update
 > `docs/PLAN.md` and `loadtest/README.md` whenever behavior or findings change.
 
@@ -97,24 +97,29 @@ vLLM stopped (or vice versa).
 Methodology and measured results live in `loadtest/README.md`.
 
 ### Tests / lint / typecheck
-- **There is no test suite, linter, or type-checker configured.** Do not claim to
-  run `pytest`/`ruff`/`mypy` unless you add and document them here.
-- Quick sanity checks:
-  ```bash
-  .venv-vllm/bin/python -c "import ast; ast.parse(open('FILE').read())"  # py syntax
-  bash -n serve/vllm.serve.sh                                             # shell syntax
-  ```
+- **Unit tests (no GPU required):** `.venv-vllm/bin/python -m pytest tests/ -q`
+  (or `make test`). Tests cover pure logic in `loadtest/bench.py` and the
+  baseline's Pydantic API models; they do **not** load models or touch the GPU.
+- **Syntax checks (what CI runs):** `make lint` — `bash -n` on every `*.sh` plus
+  `python -m compileall` on `loadtest/ v1-baseline/ tests/`.
+- There is **no configured linter/type-checker** (no ruff/mypy). Do not claim to
+  run them unless you add and document them here.
+- Dev deps live in `requirements-dev.txt`; `make setup-dev` installs them.
 
 ## Relationship to the root README
 
-`README.md` at the repo root is the **portfolio write-up** (Phase 5, done). It is
-the public face of the repo; keep it truthful and in sync with the measured
-results in `loadtest/README.md`.
+`README.md` at the repo root is the **main write-up** (Phase 5, done). It is the
+public face of the repo; keep it truthful and in sync with the measured results
+in `loadtest/README.md`.
 
 ## Repository layout
 ```
-README.md               # portfolio narrative (the public-facing write-up)
+README.md               # project write-up (the public-facing overview)
+LICENSE                 # MIT
+Makefile                # thin command wrappers (make help)
 AGENTS.md               # this file (kept at root for tooling discovery)
+requirements-dev.txt    # test/dev deps (pytest, aiohttp) — no GPU
+.github/workflows/ci.yml# CI: shell/python syntax + unit tests (no GPU)
 v1-baseline/
   main-torch.py         # naive baseline server (FastAPI + transformers, static KV)
   requirements-torch.txt# baseline stack (torch/transformers/fastapi pins)
@@ -124,8 +129,9 @@ serve/
   vllm.env              # sourceable env template + rationale for every workaround
   requirements.txt      # vLLM stack (vllm is the only direct dep; it vendors the rest)
 docs/
+  ARCHITECTURE.md       # system overview + component diagram
   PLAN.md               # phased roadmap + model decision record
-  INFRA-CONCEPTS.md     # serving/memory cheat sheet (tokens, blocks, KV math, knobs)
+  INFRA-CONCEPTS.md     # mental model of the whole project (tokens, blocks, KV math, knobs)
   TRITON-ARCHITECTURE.md# NVIDIA Triton design/integration (not deployed here)
 deploy/triton/          # reference Docker stack for Triton+vLLM (needs Docker; not run)
 loadtest/
@@ -133,6 +139,7 @@ loadtest/
   vram_watch.py         # KV-cache occupancy + nvidia-smi sampler
   run_load.sh           # standard load set (sweeps + official benchmark)
   README.md             # measured results + method per phase (2.1 / 2.2 / 2.3 / 2.4 / 3)
+tests/                  # pytest unit tests (pure logic + API models; no GPU)
 ```
 
 ## Code style & conventions
@@ -160,7 +167,10 @@ loadtest/
 - **vLLM is admission-controlled**: under overload it queues rather than
   allocator-OOMing. A true `CUDA OOM` is **not** reachable on 0.5B here — do not
   claim to have forced one. (Phase 2.4 *does* produce a real weight-driven startup
-  abort with a larger AWQ model — see `loadtest/README.md`; don't conflate the two.)
+  abort with a larger AWQ model — but it is **conditional on cold-vs-warm
+  `torch.compile` state** (cold actually compiles kernels → higher peak torch alloc →
+  less KV headroom; warm loads the cached AOT artifact), not a fixed config rule;
+  reproduce before asserting. See `loadtest/README.md`; don't conflate the two.)
 - **Quantized experiments** (Phase 2.4) are an explicit exception to the 0.5B
   canonical rule: use `MODEL=...-AWQ` (blank `QUANTIZATION` auto-detects) and
   `bench.py --model <id>`. vLLM 0.28 bundles the AWQ/Marlin ops — no extra deps.

@@ -3,6 +3,20 @@
 Measured on this box (RTX 3070 Laptop, 8 GB, WSL2). Model used everywhere:
 **`Qwen/Qwen2.5-0.5B-Instruct`** (fp16/bf16), canonical for this project.
 
+## Which Python runs what (read this before reproducing)
+
+| Role | Interpreter / command | Why |
+|---|---|---|
+| Baseline **server** (`v1-baseline/main-torch.py`, :8001) | `.venv-torch/bin/python` | needs torch + transformers |
+| vLLM **server** (:8000) | `./serve/vllm.serve.sh` | uses `.venv-vllm` via the launcher |
+| Load-test **clients** (`bench.py`, `vram_watch.py`) | **`.venv-vllm/bin/python`** | need `aiohttp` (not in `.venv-torch`) |
+
+> **Do not run the load-test clients with `.venv-torch`** (or an activated
+> `.venv-torch`, which shadows `python3`): `bench.py`/`vram_watch.py` import
+> `aiohttp`, which only exists in `.venv-vllm`, so you'd get `ModuleNotFoundError:
+> No module named 'aiohttp'`. The baseline *server* uses `.venv-torch`; the
+> *client* that hits it must use `.venv-vllm`.
+
 ## Model note (canonical / decision record)
 The permanent serving model is **0.5B-Instruct**, NOT 3B:
 - This 8 GB card must hold weights + KV cache + activations + CUDA-graph memory.
@@ -60,20 +74,22 @@ Baseline is avg of two 6-request runs (~18.5 and 21.4 tok/s). vLLM rows at N in
   (Phase 2.2 digs into VRAM-vs-concurrency/max-length).
 - Numbers are single-run, single-node, 0.5B; treat as indicative of the *mechanism*, not
   an appliance benchmark. See `bench.py` to re-run:
-  `python3 loadtest/bench.py --help`
+  `.venv-vllm/bin/python loadtest/bench.py --help`
 
 ## Reproduce
 ```bash
-# baseline (needs .venv-torch rebuilt; binds :8001)
+# Baseline SERVER runs from .venv-torch (torch/transformers); binds :8001
 nohup .venv-torch/bin/python v1-baseline/main-torch.py >/tmp/baseline.log 2>&1 &
-python3 loadtest/bench.py --url http://127.0.0.1:8001/generate --mode baseline --concurrency 1 --requests 6
 
-# vLLM (binds :8000, defaults to 0.5B)
+# CLIENT runs from .venv-vllm (needs aiohttp) — do NOT use .venv-torch here
+.venv-vllm/bin/python loadtest/bench.py --url http://127.0.0.1:8001/generate --mode baseline --concurrency 1 --requests 6
+
+# vLLM (binds :8000, defaults to 0.5B) — also driven by the .venv-vllm client
 nohup ./serve/vllm.serve.sh >/tmp/vllm.log 2>&1 &
-python3 loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode vllm --concurrency 1  --requests 6
-python3 loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode vllm --concurrency 2  --requests 12
-python3 loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode vllm --concurrency 4  --requests 24
-python3 loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode vllm --concurrency 8  --requests 40
+.venv-vllm/bin/python loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode vllm --concurrency 1  --requests 6
+.venv-vllm/bin/python loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode vllm --concurrency 2  --requests 12
+.venv-vllm/bin/python loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode vllm --concurrency 4  --requests 24
+.venv-vllm/bin/python loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions --mode vllm --concurrency 8  --requests 40
 ```
 GPU is exclusive per side; do baseline first, then vLLM (or vice versa), not together.
 
@@ -144,11 +160,12 @@ shrunk util budget it is the axis explored for OOM in Phase 2.3 (see below).
 
 ## Reproduce (Phase 2.2)
 ```bash
+# NOTE: vram_watch.py is a load-test CLIENT -> run it from .venv-vllm (needs aiohttp).
 # vLLM @ max-model-len 2048 (default)
 nohup ./serve/vllm.serve.sh >/tmp/vllm.log 2>&1 &
-python3 loadtest/vram_watch.py --port 8000 --concurrency 1 --max-tokens 512 --requests 1 --ignore-eos
-python3 loadtest/vram_watch.py --port 8000 --concurrency 4 --max-tokens 512 --requests 4 --ignore-eos
-python3 loadtest/vram_watch.py --port 8000 --concurrency 8 --max-tokens 512 --requests 8 --ignore-eos
+.venv-vllm/bin/python loadtest/vram_watch.py --port 8000 --concurrency 1 --max-tokens 512 --requests 1 --ignore-eos
+.venv-vllm/bin/python loadtest/vram_watch.py --port 8000 --concurrency 4 --max-tokens 512 --requests 4 --ignore-eos
+.venv-vllm/bin/python loadtest/vram_watch.py --port 8000 --concurrency 8 --max-tokens 512 --requests 8 --ignore-eos
 
 # vLLM @ max-model-len 8192 to compare config/headroom
 MAX_MODEL_LEN=8192 nohup ./serve/vllm.serve.sh >/tmp/vllm8192.log 2>&1 &
@@ -211,14 +228,12 @@ raise it (subject to VRAM/KV arithmetic) and they pass.
 ## Conclusion / why a real OOM needs the appendix
 A true raster-level `CUDA out of memory` on permanent 0.5B is effectively
 unreachable, because (a) the model is far too small to starve even a shrunk cache,
-and (b) the memory manager refuses to oversubscribe. The genuinely dramatic OOM —
-weights that genuinely do not fit → startup abort (`No available memory for the
-cache blocks`, as seen with 3B) or runtime exhaustion — requires the
-**quantized-larger-model appendix** (e.g. 3B-AWQ, or a very-low-util + very-large
-max-len pathological config), which compresses weights enough to boot but still
-far closer to the memory ceiling. That is deliberately pending as an optional later
-milestone; the value captured here is the admission-control + KV-arithmetic lesson,
-which is the transferable infra concept.
+and (b) the memory manager refuses to oversubscribe. A startup abort requires
+weights that dominate the budget — which the **quantized-larger-model appendix**
+(Phase 2.4) provides. That abort turns out to be **conditional** (cold vs warm
+`torch.compile` state), not a fixed config rule; see the Phase 2.4 section below. The
+value captured here is the admission-control + KV-arithmetic lesson, the
+transferable infra concept.
 
 ## Recovery levers exercised (so they are documented where they do matter)
 - `GPU_UTIL` — right-sizes the reserved KV pool to workload (0.45 → drops idle VRAM
@@ -233,11 +248,12 @@ which is the transferable infra concept.
 
 ## Reproduce
 ```bash
+# NOTE: vram_watch.py is a load-test CLIENT -> run it from .venv-vllm (needs aiohttp).
 # under-provisioned cache (util 0.45, longer max len)
 GPU_UTIL=0.45 MAX_MODEL_LEN=4096 nohup ./serve/vllm.serve.sh >/tmp/vllm45.log 2>&1 &
 curl -s http://127.0.0.1:8000/metrics | grep -a cache_config_info   # blocks/cache size
 # sustained burst -> queues, does NOT OOM:
-python3 loadtest/vram_watch.py --port 8000 --concurrency 48 --max-tokens 1500 --requests 48 --ignore-eos
+.venv-vllm/bin/python loadtest/vram_watch.py --port 8000 --concurrency 48 --max-tokens 1500 --requests 48 --ignore-eos
 # deterministic config rejection -> fix lever:
 curl -s http://127.0.0.1:8000/v1/chat/completions -H 'content-type: application/json' \
   -d '{"model":"Qwen/Qwen2.5-0.5B-Instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":5000}'
@@ -280,38 +296,73 @@ Scaling mirrors Phase 2.1 (aggregate tok/s rises with N). The first N=8 run is a
 **cold-start** effect, not a steady-state regression. Quality check: an int4 sample
 answer about PagedAttention was coherent and on-topic, so int4 remains usable.
 
-## The genuine weight-driven wall: 7B-AWQ ✅ (what 2.3 could not produce)
+## The 7B weight-driven wall: 7B-AWQ (conditional — cold vs warm)
 
 7B-AWQ weights are **5.29 GiB** on the 8 GB card. Its KV arithmetic is also heavier:
 head_dim 128, 28 layers, 4 KV heads → `2×28×4×128×2 = 56 KB/token`
 (vs 12 KB/token for 0.5B).
 
-| 7B-AWQ config | GPU KV cache | cache tokens | max concurrency @2048 | result |
-|---|---|---|---|---|
-| `--max-model-len 2048` | 0.2 GiB | 3,696 | **1.8×** | boots, barely (1-2 concurrent seqs) |
-| `--max-model-len 8192` | needs 0.44 GiB, only 0.2 GiB free | — | — | **hard startup abort** |
+At `gpu_memory_utilization 0.85`, the post-weights budget depends on **`torch.compile`
+(Inductor) kernel compilation** — whether it actually compiles, or just loads the
+cached Ahead-Of-Time (AOT) artifact. That is *not* the same as CUDA-graph capture
+(which happens later, in both cases, ~0.4 GiB). A **cold** run (no
+`~/.cache/vllm/torch_compile_cache`) spends ~22 s compiling kernels; a **warm** run
+loads the saved AOT artifact in ~1 s. So `--max-model-len 8192` is **not
+deterministically fatal** — it aborts only on the cold/compile path.
 
-The `max_model_len=8192` startup failed with the real memory-arithmetic wall:
+Reproduced with vLLM's own memory profiling (`VLLM_LOGGING_LEVEL=DEBUG`), after
+clearing `~/.cache/vllm/torch_compile_cache`:
 
+| | COLD (compile cache cleared) | WARM (AOT cache present) |
+|---|---|---|
+| `torch.compile` | **21.6 s** (Dynamo 7.8 s + compile graph 8.1 s) | **1.1 s** (`Directly load AOT`) |
+| profiling time | 26.1 s | 4.7 s |
+| init snapshot (both) | `free=6.95 GiB, non_torch=1.05 GiB` | `free=6.95 GiB, non_torch=1.05 GiB` |
+| **torch peak increase during profiling** | **1.04 GiB** | **0.26 GiB** |
+| total consumed (mem_get_info) | 5.57 GiB | 5.57 GiB |
+| **non-KV-cache memory** (`consumed + peak headroom`) | **6.6 GiB** | **5.82 GiB** |
+| **Available KV cache** | **0.2 GiB** | **0.98 GiB** |
+| `--max-model-len 8192` | ❌ **startup abort** | ✅ **boots** — 18,400 tok, 2.25× |
+
+Cold-run abort (exact message):
 ```
 ValueError: To serve at least one request with the model's max seq len (8192),
 0.44 GiB KV cache is needed, which is larger than the available KV cache memory (0.2 GiB).
 Based on the available memory, the estimated maximum model length is 3696.
 Try increasing `gpu_memory_utilization` ... or decreasing `max_model_len` ...
 ```
+Warm-run success (`/health` 200): `GPU KV cache size: 18,400 tokens, Maximum
+concurrency for 8,192 tokens per request: 2.25x`.
 
-This is the weight-driven ceiling in concrete form: 5.29 GiB weights leave only
-~0.2 GiB for PagedAttention, so vLLM **refuses to start** rather than oversubscribe.
-Unlike Phase 2.3 (load-time queueing on 0.5B), this is a genuine, reproducible
-**OOM-class failure** — the engine's own message states the max supportable length
-(3696) and the levers.
+**The mechanism (confirmed from vLLM's profiling output, not inferred):** vLLM sizes
+the KV cache as `requested_budget − non_KV_cache_memory`, where
+`non_KV_cache_memory = total_consumed + transient_peak_headroom`
+(`vllm/utils/mem_utils.py`). On both runs `total_consumed` is *identical* (5.57 GiB:
+weights + persistent non-torch). What differs is **`transient_peak_headroom`** —
+the peak *torch* allocation observed during profiling: **1.04 GiB cold vs 0.26 GiB
+warm**. Inductor's kernel compilation runs/validates the traced graph on the GPU,
+so it produces a large transient allocation peak; loading the AOT artifact does not.
+vLLM conservatively reserves that peak as headroom, so the cold run's extra ~0.78 GiB
+comes out of KV cache (0.98 → 0.2 GiB) — just enough to break 8192.
 
-### Recovery lever ✅
-Relaunched at `--max-model-len 2048` (a length the weight-crowded budget can hold):
-boots cleanly, **0.98 GiB cache / 18,400 tokens / 8.98× concurrency**, `/health` 200,
-serves coherent int4 output. So the fix story is:
-**lower `max_model_len` to fit the post-weights budget** (alternatives: raise
-`gpu_memory_utilization`, or use the smaller 3B-AWQ).
+**What this means:** the weight-vs-KV arithmetic is real (5.29 GiB weights leave
+very little cache), but the exact failure boundary **also depends on the
+compilation transient**, i.e. process state. A *steady-state serving* activation
+does **not** differ (both runs' warmup steps were ~0.02–0.03 s); the difference is
+the **compile-time** peak. So "does it fit?" is not a fixed config rule — reproduce
+in a known state before asserting a failure.
+
+> Precise wording: the cold/warm difference is the **`torch.compile`/Inductor kernel
+> compilation transient** (and when vLLM samples peak memory), *not* serving
+> activations and *not* CUDA-graph capture (which is later and ~equal in both).
+
+### Recovery levers (still valid)
+When the abort does occur, the fix is to reduce the KV demand to fit the
+post-weights budget:
+- **lower `--max-model-len`** (less KV needed per sequence; 2048 always fit here), and/or
+- **raise `--gpu-memory-utilization`** (reserve more), and/or
+- **use the smaller 3B-AWQ** (or a warm compile cache, which is not a "tuning" lever
+  but does change the outcome).
 
 ## Consolidated weight-vs-KV table (all measured)
 | Model (mode) | Weight GPU mem | KV cache avail | cache tokens | verdict |
@@ -319,28 +370,42 @@ serves coherent int4 output. So the fix story is:
 | 0.5B bf16 (canonical) | ~1 GB | ~5.5 GiB | 481,296 | fits comfortably |
 | 3B bf16 | ~6 GB | negative | — | **won't boot** |
 | 3B-AWQ int4 | 1.95 GiB | 3.99 GiB | 116,240 | fits well |
-| 7B-AWQ int4 @2048 | 5.29 GiB | 0.2 GiB | 3,696 | fits w/ ~1.8× concurrency |
-| 7B-AWQ int4 @8192 | 5.29 GiB | needs 0.44 GiB | — | **startup abort** |
+| 7B-AWQ int4 @2048 | 5.29 GiB | 0.2 GiB (cold) | 3,696 | boots; ~1.8× concurrency |
+| 7B-AWQ int4 @8192, **cold** (compile) | 5.29 GiB | 0.2 GiB | needs 0.44 | **startup abort** |
+| 7B-AWQ int4 @8192, **warm** (AOT cache) | 5.29 GiB | 0.98 GiB | 18,400 | boots; 2.25× concurrency |
+
+Note: the cold-vs-warm difference is the `torch.compile`/Inductor **kernel-compilation
+transient** raising the peak torch allocation (1.04 → 0.26 GiB), which vLLM reserves
+as headroom — *not* CUDA-graph capture and *not* steady-state serving activations.
 
 ## Takeaways
 - **Quantization is a memory lever**: it converts an unbootable 3B into a
   comfortably servable one, and makes a 7B land *just* within an 8 GB card.
-- **Weights and KV compete for the same budget**: once weights dominate (7B), KV
-  collapses and `max_model_len` must shrink — the exact trade the plan wanted to show.
+- **Weights and KV compete for the same budget**, and so does the transient peak
+  from `torch.compile`/Inductor. Once weights dominate (7B), KV headroom is thin and
+  `max_model_len` becomes the knob — but the exact abort boundary moves with whether
+  kernels were compiled or loaded from the AOT cache (cold vs warm).
+- **A failure is not automatically deterministic.** The original "8192 always
+  aborts" claim was a cold-run artifact; the honest result is *conditional*. Verify
+  the state before asserting a wall (a repo lesson, not just a serving one).
 - **The docs rule still holds**: 0.5B remains the canonical model; this phase is a
   deliberate, bounded experiment using the launcher's `MODEL=` / `QUANTIZATION=`
   overrides. No new Python deps were needed (ops are bundled in vLLM).
 
 ## Reproduce (Phase 2.4)
 ```bash
+# NOTE: bench.py is a load-test CLIENT -> run it from .venv-vllm (needs aiohttp).
 # 3B-AWQ: quantization makes a 3B servable (bf16 3B won't boot)
 MODEL=Qwen/Qwen2.5-3B-Instruct-AWQ nohup ./serve/vllm.serve.sh >/tmp/vllm_3bawq.log 2>&1 &
 .venv-vllm/bin/python loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions \
   --mode vllm --model Qwen/Qwen2.5-3B-Instruct-AWQ --concurrency 8 --requests 8 --max-tokens 64
 
-# 7B-AWQ: weight-driven wall (startup abort at 8192)
-MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ MAX_MODEL_LEN=8192 nohup ./serve/vllm.serve.sh >/tmp/vllm_7b_8k.log 2>&1 &
-# ... then the recovery: a max_len the weights leave room for
+# 7B-AWQ: weight-driven wall is CONDITIONAL (cold vs warm compile cache)
+# (a) COLD run reproduces the 8192 startup abort:
+rm -rf ~/.cache/vllm/torch_compile_cache
+MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ MAX_MODEL_LEN=8192 nohup ./serve/vllm.serve.sh >/tmp/vllm_7b_cold.log 2>&1 &
+# (b) once warm (cache repopulated), the same flags boot; recovery also = lower max_len:
+MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ MAX_MODEL_LEN=8192 nohup ./serve/vllm.serve.sh >/tmp/vllm_7b_warm.log 2>&1 &
 MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ MAX_MODEL_LEN=2048 nohup ./serve/vllm.serve.sh >/tmp/vllm_7b.log 2>&1 &
 ```
 (Optional explicit flag if auto-detect ever fails: `QUANTIZATION=awq_marlin`.)
@@ -410,8 +475,9 @@ Results JSON is saved under the run's `--result-dir` (e.g. `/tmp/p3_bench/`).
 
 ## Reproduce (Phase 3)
 ```bash
+# NOTE: load-test CLIENTS run from .venv-vllm (bench.py/vllm bench need aiohttp).
 # server up (see ../serve/vllm.serve.sh), then:
-./loadtest/run_load.sh                      # all three groups
+./loadtest/run_load.sh                      # all three groups (uses .venv-vllm)
 
 # or individually:
 .venv-vllm/bin/python loadtest/bench.py --url http://127.0.0.1:8000/v1/chat/completions \

@@ -1,5 +1,8 @@
 # AI Inference Engine — LLM serving on a single 8 GB GPU
 
+[![ci](https://github.com/rsrusson/ai-inference-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/rsrusson/ai-inference-engine/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 How **continuous batching** and **PagedAttention** make LLM inference fast and
 memory-safe — demonstrated by A/B-testing a hand-written PyTorch server against
 **vLLM** on one consumer GPU, with measured throughput, latency, and KV-cache
@@ -8,10 +11,10 @@ behavior.
 Canonical model: `Qwen/Qwen2.5-0.5B-Instruct` · 1× RTX 3070 Laptop (8 GB) · WSL2
 · vLLM 0.28 · Python 3.10.
 
-> This is a learning/portfolio project. Every number below is measured and traced
-> to the raw results in [`loadtest/README.md`](loadtest/README.md); nothing is
-> invented. Where a claim couldn't be demonstrated (e.g. forcing a CUDA OOM on a
-> tiny model), that is stated explicitly.
+> Every number below is measured and traced to raw results in
+> [`loadtest/README.md`](loadtest/README.md). Where something could not be
+> demonstrated (e.g. forcing a CUDA OOM on a tiny model), that is stated
+> explicitly rather than glossed over.
 
 ---
 
@@ -126,21 +129,26 @@ and *queues* rather than oversubscribing. Deliberately shrinking the cache to
 The reproducible failure is instead the config boundary:
 `max_tokens > max_model_len` → HTTP 400. **A real OOM needs the next phase.**
 
-### Phase 2.4 — quantized larger models (the real memory wall)
+### Phase 2.4 — quantized larger models (weight-driven memory wall, conditional)
 | Model | Weight GPU mem | KV cache | Cache tokens | Verdict |
 |---|---|---|---|---|
 | 0.5B bf16 (canonical) | ~1 GB | ~5.5 GiB | 481,296 | fits comfortably |
 | 3B bf16 | ~6 GB | negative | — | won't boot |
 | **3B-AWQ int4** | 1.95 GiB | 3.99 GiB | 116,240 | fits well |
-| **7B-AWQ int4** | 5.29 GiB | 0.2 GiB | 3,696 | fits with ~1.8× concurrency |
-| 7B-AWQ int4, `max-model-len 8192` | 5.29 GiB | needs 0.44 GiB | — | **startup abort** |
+| **7B-AWQ int4** | 5.29 GiB | 0.2–0.98 GiB | 3,696–18,400 | fits, thin headroom |
+| 7B-AWQ int4, `max-model-len 8192` (cold: compiles) | 5.29 GiB | 0.2 GiB | needs 0.44 | **startup abort** |
+| 7B-AWQ int4, `max-model-len 8192` (warm: AOT cache) | 5.29 GiB | 0.98 GiB | 18,400 | boots (2.25×) |
 
 - **Quantization buys headroom:** it turns an unbootable bf16 3B into a
   comfortably servable one, and makes a 7B land just inside an 8 GB card.
-- **The weight-driven wall, finally:** 7B-AWQ's 5.29 GiB of weights leave only
-  0.2 GiB for cache, so `--max-model-len 8192` fails at startup with vLLM's own
-  arithmetic (`0.44 GiB needed > 0.2 GiB available`). Recovery: lower
-  `max_model_len` → boots (0.98 GiB cache / 8.98×).
+- **The weight-driven wall is *conditional*:** 7B-AWQ's 5.29 GiB of weights leave
+  thin cache headroom, so `--max-model-len 8192` **aborts on a cold run**
+  (`0.44 GiB needed > 0.2 GiB available`) but **boots once warm**. The variable is
+  `torch.compile`/Inductor: cold, it compiles kernels (peak torch alloc ~1.0 GiB);
+  warm, it loads the cached AOT artifact (peak ~0.26 GiB) — vLLM reserves that peak,
+  so cold gets 0.2 GiB cache vs warm 0.98 GiB. (Not CUDA graphs, not serving
+  activations.) Recovery: lower `max_model_len`. Lesson: reproduce in a known state
+  before asserting a failure is deterministic.
 
 ### Phase 3 — load-testing instrumentation (TTFT / ITL)
 Built a streaming client (`loadtest/bench.py --stream`) that measures
@@ -167,7 +175,7 @@ signature: **throughput scales, ITL stays flat, TTFT grows modestly.**
 ## Reproduce
 
 ```bash
-# 1) environment (two venvs: engine + baseline)
+# 1) environment (two venvs: engine + baseline) — or just `make setup`
 python3 -m venv .venv-vllm
 .venv-vllm/bin/pip install --upgrade pip
 .venv-vllm/bin/pip install -r serve/requirements.txt
@@ -186,6 +194,15 @@ curl -s http://127.0.0.1:8000/health        # 200 = ready
 nohup .venv-torch/bin/python v1-baseline/main-torch.py >/tmp/baseline.log 2>&1 &
 ```
 
+Unit tests (no GPU) run in CI and locally: `make test` (`pytest tests/`).
+
+**Which Python runs what:** the baseline *server* uses `.venv-torch`
+(torch/transformers); the vLLM *server* runs via `serve/vllm.serve.sh`
+(`.venv-vllm`); and every load-test *client* (`loadtest/bench.py`,
+`vram_watch.py`, `run_load.sh`) must use **`.venv-vllm`**, because those scripts
+import `aiohttp` (not installed in `.venv-torch`). Don't activate `.venv-torch`
+when running the client.
+
 Notes: WSL2 + this GPU require specific vLLM env workarounds — all encapsulated
 in `serve/vllm.serve.sh` and explained in `serve/vllm.env`. Never run the baseline
 and vLLM simultaneously for measurements.
@@ -198,16 +215,20 @@ and vLLM simultaneously for measurements.
 serve/         vLLM launcher (serve/vllm.serve.sh), env rationale, requirements
 v1-baseline/   naive torch/transformers baseline + its own requirements
 loadtest/      bench.py (tok/s, TTFT/ITL), vram_watch.py, run_load.sh, results
-docs/          PLAN.md (roadmap/decisions), INFRA-CONCEPTS.md, TRITON-ARCHITECTURE.md
+docs/          ARCHITECTURE.md, PLAN.md, INFRA-CONCEPTS.md, TRITON-ARCHITECTURE.md
 deploy/triton/ reference Docker stack for a Triton front-end (not run here)
-AGENTS.md      notes for coding agents
+tests/         pytest unit tests (pure logic + API models; no GPU)
+Makefile       make setup / serve / bench / test / lint (see `make help`)
 ```
+
+Convenience: `make help` lists targets; `make test` runs the unit suite;
+`make lint` runs the syntax checks (same as CI, see `.github/workflows/ci.yml`).
 
 ## Roadmap / status
 - ✅ Phases 0–3 (env, serving, throughput/KV/OOM, load-testing)
-- ✅ Phase 2.4 (quantized weight-driven wall)
+- ✅ Phase 2.4 (quantized weight-driven wall — conditional cold/warm)
 - 📝 Phase 4 (Triton) — architected, deployment deferred (needs Docker)
 - See [`docs/PLAN.md`](docs/PLAN.md) for the full roadmap and decision record.
 
-## Author
-`rsrusson` — portfolio project for AI Infrastructure engineering.
+## License
+MIT — see [`LICENSE`](LICENSE).

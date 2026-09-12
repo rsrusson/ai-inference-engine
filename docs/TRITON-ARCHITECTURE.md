@@ -6,12 +6,12 @@ This phase is **architected and documented, not deployed** on the dev box — se
 reference stack is provided under `deploy/triton/` for a Docker-capable host.
 
 > Context: this repo serves `Qwen/Qwen2.5-0.5B-Instruct` with vLLM on an 8 GB
-> RTX 3070 Laptop under WSL2. Read `INFRA-CONCEPTS.md` for the serving/memory
-> basics and `loadtest/README.md` for the measured results.
+> RTX 3070 Laptop under WSL2. Read `INFRA-CONCEPTS.md` for the full serving/memory
+> mental model and `loadtest/README.md` for the measured results.
 
 ---
 
-## 1. First, the name collision (common interview trap)
+## 1. First, the name collision (common point of confusion)
 
 Two unrelated projects are both called "Triton":
 
@@ -163,7 +163,7 @@ Decision record (truthful; see the repo's "don't fake results" rule):
    (Phases 2–3). Running Triton and a vLLM engine concurrently would contend for
    the same VRAM; there is no second GPU.
 4. **Scope.** Phase 4 was always marked optional. A half-installed server would
-   be a worse portfolio artifact than a clear, correct architecture + a runnable
+   be a worse engineering artifact than a clear, correct architecture + a runnable
    reference stack for a Docker host.
 
 Also note: the `triton` pip package present in `.venv-vllm` is **OpenAI Triton**
@@ -181,11 +181,10 @@ the Phase 3 load tools at the Triton endpoint to compare against direct vLLM.
 
 ---
 
-## 9. Interview framing
-- Know the **name collision** and that Triton is a *platform*, vLLM an *engine*.
-- Be able to sketch **Mode 1 vs Mode 2** and justify choosing Mode 2 when vLLM is
-  a fixed, tuned dependency.
-- Explain Triton's value as **operational** (multi-model, protocols, lifecycle,
-  metrics), not a magic throughput boost for a single LLM.
-- State the deployment constraint honestly: container-first distribution → needs
-  Docker, which the WSL2 dev box lacks.
+## 9. Summary / key takeaways
+- Remember the **name collision**: Triton is a *platform*, vLLM an *engine*.
+- Choose **Mode 1 vs Mode 2**: use Mode 2 when vLLM is a fixed, tuned dependency.
+- Triton's value is **operational** (multi-model, protocols, lifecycle, metrics),
+  not a magic throughput boost for a single LLM.
+- The deployment constraint is real: container-first distribution → needs Docker,
+  which the WSL2 dev box lacks.

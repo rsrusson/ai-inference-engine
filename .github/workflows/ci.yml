@@ -1,0 +1,39 @@
+name: ci
+
+# Lightweight, GPU-free CI: syntax checks + unit tests. The GPU benchmarks
+# (vLLM serving, load tests) require an NVIDIA GPU + WSL2 host and are NOT run
+# here; see loadtest/README.md for the measured results and how to reproduce.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Shell syntax check
+        run: |
+          for f in $(git ls-files '*.sh'); do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
+
+      - name: Python syntax check
+        run: python -m compileall -q loadtest v1-baseline tests
+
+      - name: Unit tests
+        run: python -m pytest tests/ -q
